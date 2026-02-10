@@ -261,19 +261,16 @@ const ResetParts = struct {
 };
 
 fn localtimeCompat(ts: i64, out_tm: *c.struct_tm) bool {
-    var t: c.time_t = @intCast(ts);
-
     if (comptime builtin.os.tag == .windows) {
-        // Use the exported CRT symbol first; localtime_s may be an inline wrapper.
+        // Bind directly to the exported CRT symbol on Windows.
         if (comptime @hasDecl(c, "_localtime64_s") and @hasDecl(c, "__time64_t")) {
-            var t64: c.__time64_t = @intCast(ts);
+            var t64 = std.math.cast(c.__time64_t, ts) orelse return false;
             return c._localtime64_s(out_tm, &t64) == 0;
         }
-        if (comptime @hasDecl(c, "localtime_s")) {
-            return c.localtime_s(out_tm, &t) == 0;
-        }
+        return false;
     }
 
+    var t = std.math.cast(c.time_t, ts) orelse return false;
     if (comptime @hasDecl(c, "localtime_r")) {
         return c.localtime_r(&t, out_tm) != null;
     }
