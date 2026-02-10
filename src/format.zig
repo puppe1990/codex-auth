@@ -263,6 +263,12 @@ const ResetParts = struct {
 fn localtimeCompat(ts: i64, out_tm: *c.struct_tm) bool {
     var t: c.time_t = @intCast(ts);
 
+    if (comptime builtin.os.tag == .windows) {
+        if (comptime @hasDecl(c, "localtime_s")) {
+            return c.localtime_s(out_tm, &t) == 0;
+        }
+    }
+
     if (comptime @hasDecl(c, "localtime_r")) {
         return c.localtime_r(&t, out_tm) != null;
     }
@@ -613,7 +619,13 @@ fn terminalWidth() usize {
     if (!stdout_file.isTty()) return 0;
 
     if (comptime builtin.os.tag == .windows) {
-        return 0;
+        var info: std.os.windows.CONSOLE_SCREEN_BUFFER_INFO = undefined;
+        if (std.os.windows.kernel32.GetConsoleScreenBufferInfo(stdout_file.handle, &info) == std.os.windows.FALSE) {
+            return 0;
+        }
+        const width = @as(i32, info.srWindow.Right) - @as(i32, info.srWindow.Left) + 1;
+        if (width <= 0) return 0;
+        return @as(usize, @intCast(width));
     } else {
         var wsz: std.posix.winsize = .{
             .row = 0,

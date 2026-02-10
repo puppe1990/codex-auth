@@ -736,6 +736,12 @@ const ResetParts = struct {
 fn localtimeCompat(ts: i64, out_tm: *c.struct_tm) bool {
     var t: c.time_t = @intCast(ts);
 
+    if (comptime builtin.os.tag == .windows) {
+        if (comptime @hasDecl(c, "localtime_s")) {
+            return c.localtime_s(out_tm, &t) == 0;
+        }
+    }
+
     if (comptime @hasDecl(c, "localtime_r")) {
         return c.localtime_r(&t, out_tm) != null;
     }
