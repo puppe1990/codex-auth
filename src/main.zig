@@ -1,0 +1,162 @@
+const std = @import("std");
+const cli = @import("cli.zig");
+const registry = @import("registry.zig");
+const auth = @import("auth.zig");
+const sessions = @import("sessions.zig");
+const format = @import("format.zig");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    var cmd = try cli.parseArgs(allocator, args);
+    defer cli.freeCommand(allocator, &cmd);
+
+    const codex_home = try registry.resolveCodexHome(allocator);
+    defer allocator.free(codex_home);
+
+    switch (cmd) {
+        .list => |opts| try handleList(allocator, codex_home, opts),
+        .add => |opts| try handleAdd(allocator, codex_home, opts),
+        .import_auth => |opts| try handleImport(allocator, codex_home, opts),
+        .switch_account => |_| try handleSwitch(allocator, codex_home),
+        .remove_account => |_| try handleRemove(allocator, codex_home),
+        .help => try cli.printHelp(),
+    }
+}
+
+fn handleList(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.ListOptions) !void {
+    _ = opts;
+    var reg = try registry.loadRegistry(allocator, codex_home);
+    defer reg.deinit(allocator);
+    if (try registry.syncActiveAccountFromAuth(allocator, codex_home, &reg)) {
+        try registry.saveRegistry(allocator, codex_home, &reg);
+    }
+    var needs_refresh = false;
+    for (reg.accounts.items) |rec| {
+        if (rec.plan == null or rec.auth_mode == null) {
+            needs_refresh = true;
+            break;
+        }
+    }
+    if (needs_refresh) {
+        try registry.refreshAccountsFromAuth(allocator, codex_home, &reg);
+        try registry.saveRegistry(allocator, codex_home, &reg);
+    }
+    if (try refreshActiveUsageFromSessions(allocator, codex_home, &reg)) {
+        try registry.saveRegistry(allocator, codex_home, &reg);
+    }
+    try format.printAccounts(allocator, &reg, .table);
+}
+
+fn handleAdd(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.AddOptions) !void {
+    if (opts.login) {
+        try cli.runCodexLogin(allocator);
+    }
+    const auth_path = try registry.activeAuthPath(allocator, codex_home);
+    defer allocator.free(auth_path);
+
+    const info = try auth.parseAuthInfo(allocator, auth_path);
+    defer info.deinit(allocator);
+
+    var reg = try registry.loadRegistry(allocator, codex_home);
+    defer reg.deinit(allocator);
+
+    const email = info.email orelse return error.MissingEmail;
+    const dest = try registry.accountAuthPath(allocator, codex_home, email);
+    defer allocator.free(dest);
+
+    try registry.ensureAccountsDir(allocator, codex_home);
+    try registry.copyFile(auth_path, dest);
+
+    const record = try registry.accountFromAuth(allocator, "", &info);
+    registry.upsertAccount(allocator, &reg, record);
+    try registry.saveRegistry(allocator, codex_home, &reg);
+}
+
+fn handleImport(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.ImportOptions) !void {
+    var reg = try registry.loadRegistry(allocator, codex_home);
+    defer reg.deinit(allocator);
+    const summary = try registry.importAuthPath(allocator, codex_home, &reg, opts.auth_path, opts.name);
+    if (summary.imported > 0) {
+        try registry.saveRegistry(allocator, codex_home, &reg);
+    }
+}
+
+fn handleSwitch(allocator: std.mem.Allocator, codex_home: []const u8) !void {
+    var reg = try registry.loadRegistry(allocator, codex_home);
+    defer reg.deinit(allocator);
+    if (try registry.syncActiveAccountFromAuth(allocator, codex_home, &reg)) {
+        try registry.saveRegistry(allocator, codex_home, &reg);
+    }
+    if (try refreshActiveUsageFromSessions(allocator, codex_home, &reg)) {
+        try registry.saveRegistry(allocator, codex_home, &reg);
+    }
+
+    const selected = try cli.selectAccount(allocator, &reg);
+    if (selected == null) {
+        return;
+    }
+    const email = selected.?;
+
+    const src = try registry.accountAuthPath(allocator, codex_home, email);
+    defer allocator.free(src);
+
+    const dest = try registry.activeAuthPath(allocator, codex_home);
+    defer allocator.free(dest);
+
+    try registry.backupAuthIfChanged(allocator, codex_home, dest, src);
+    try registry.copyFile(src, dest);
+
+    try registry.setActiveAccount(allocator, &reg, email);
+    try registry.saveRegistry(allocator, codex_home, &reg);
+}
+
+fn handleRemove(allocator: std.mem.Allocator, codex_home: []const u8) !void {
+    var reg = try registry.loadRegistry(allocator, codex_home);
+    defer reg.deinit(allocator);
+    if (try registry.syncActiveAccountFromAuth(allocator, codex_home, &reg)) {
+        try registry.saveRegistry(allocator, codex_home, &reg);
+    }
+
+    const selected = try cli.selectAccountsToRemove(allocator, &reg);
+    if (selected == null) return;
+    defer allocator.free(selected.?);
+    if (selected.?.len == 0) return;
+
+    try registry.removeAccounts(allocator, codex_home, &reg, selected.?);
+    if (reg.active_email == null and reg.accounts.items.len > 0) {
+        const best_idx = registry.selectBestAccountIndexByUsage(&reg) orelse 0;
+        const email = reg.accounts.items[best_idx].email;
+
+        const src = try registry.accountAuthPath(allocator, codex_home, email);
+        defer allocator.free(src);
+
+        const dest = try registry.activeAuthPath(allocator, codex_home);
+        defer allocator.free(dest);
+
+        try registry.backupAuthIfChanged(allocator, codex_home, dest, src);
+        try registry.copyFile(src, dest);
+        try registry.setActiveAccount(allocator, &reg, email);
+    }
+    try registry.saveRegistry(allocator, codex_home, &reg);
+}
+
+fn refreshActiveUsageFromSessions(allocator: std.mem.Allocator, codex_home: []const u8, reg: *registry.Registry) !bool {
+    const snapshot = sessions.scanLatestUsage(allocator, codex_home) catch return false;
+    if (snapshot == null) return false;
+    const email = reg.active_email orelse return false;
+    registry.updateUsage(allocator, reg, email, snapshot.?);
+    return true;
+}
+
+// Tests live in separate files but are pulled in by main.zig for zig test.
+test {
+    _ = @import("tests/auth_test.zig");
+    _ = @import("tests/sessions_test.zig");
+    _ = @import("tests/registry_test.zig");
+}
