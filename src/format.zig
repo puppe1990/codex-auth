@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const registry = @import("registry.zig");
 const cli = @import("cli.zig");
 const io_util = @import("io_util.zig");
@@ -6,7 +7,6 @@ const timefmt = @import("timefmt.zig");
 const c = @cImport({
     @cInclude("time.h");
 });
-const linux = std.os.linux;
 
 const ansi = struct {
     const reset = "\x1b[0m";
@@ -15,7 +15,7 @@ const ansi = struct {
 };
 
 fn colorEnabled() bool {
-    return std.posix.isatty(std.posix.STDOUT_FILENO);
+    return std.fs.File.stdout().isTty();
 }
 
 fn planDisplay(rec: *const registry.AccountRecord, missing: []const u8) []const u8 {
@@ -260,19 +260,42 @@ const ResetParts = struct {
     }
 };
 
+fn localtimeCompat(ts: i64, out_tm: *c.struct_tm) bool {
+    if (comptime builtin.os.tag == .windows) {
+        // Bind directly to the exported CRT symbol on Windows.
+        if (comptime @hasDecl(c, "_localtime64_s") and @hasDecl(c, "__time64_t")) {
+            var t64 = std.math.cast(c.__time64_t, ts) orelse return false;
+            return c._localtime64_s(out_tm, &t64) == 0;
+        }
+        return false;
+    }
+
+    var t = std.math.cast(c.time_t, ts) orelse return false;
+    if (comptime @hasDecl(c, "localtime_r")) {
+        return c.localtime_r(&t, out_tm) != null;
+    }
+
+    if (comptime @hasDecl(c, "localtime")) {
+        const tm_ptr = c.localtime(&t);
+        if (tm_ptr == null) return false;
+        out_tm.* = tm_ptr.*;
+        return true;
+    }
+
+    return false;
+}
+
 fn resetPartsAlloc(reset_at: i64, now: i64) !ResetParts {
-    var t: c.time_t = @intCast(reset_at);
     var tm: c.struct_tm = undefined;
-    if (c.localtime_r(&t, &tm) == null) {
+    if (!localtimeCompat(reset_at, &tm)) {
         return ResetParts{
             .time = try std.fmt.allocPrint(std.heap.page_allocator, "-", .{}),
             .date = try std.fmt.allocPrint(std.heap.page_allocator, "-", .{}),
             .same_day = true,
         };
     }
-    var now_t: c.time_t = @intCast(now);
     var now_tm: c.struct_tm = undefined;
-    if (c.localtime_r(&now_t, &now_tm) == null) {
+    if (!localtimeCompat(now, &now_tm)) {
         return ResetParts{
             .time = try std.fmt.allocPrint(std.heap.page_allocator, "-", .{}),
             .date = try std.fmt.allocPrint(std.heap.page_allocator, "-", .{}),
@@ -370,14 +393,12 @@ fn remainingPercent(used: f64) i64 {
 }
 
 fn formatResetTimeAlloc(ts: i64, now: i64) ![]u8 {
-    var t: c.time_t = @intCast(ts);
     var tm: c.struct_tm = undefined;
-    if (c.localtime_r(&t, &tm) == null) {
+    if (!localtimeCompat(ts, &tm)) {
         return try std.fmt.allocPrint(std.heap.page_allocator, "-", .{});
     }
-    var now_t: c.time_t = @intCast(now);
     var now_tm: c.struct_tm = undefined;
-    if (c.localtime_r(&now_t, &now_tm) == null) {
+    if (!localtimeCompat(now, &now_tm)) {
         return try std.fmt.allocPrint(std.heap.page_allocator, "-", .{});
     }
 
@@ -596,12 +617,28 @@ fn tableTotalWidth(widths: []const usize) usize {
 }
 
 fn terminalWidth() usize {
-    const fd = std.posix.STDOUT_FILENO;
-    if (!std.posix.isatty(fd)) return 0;
-    var wsz: std.posix.winsize = undefined;
-    const rc = linux.syscall3(.ioctl, @bitCast(@as(isize, fd)), linux.T.IOCGWINSZ, @intFromPtr(&wsz));
-    if (linux.E.init(rc) != .SUCCESS) return 0;
-    return @as(usize, wsz.col);
+    const stdout_file = std.fs.File.stdout();
+    if (!stdout_file.isTty()) return 0;
+
+    if (comptime builtin.os.tag == .windows) {
+        var info: std.os.windows.CONSOLE_SCREEN_BUFFER_INFO = undefined;
+        if (std.os.windows.kernel32.GetConsoleScreenBufferInfo(stdout_file.handle, &info) == std.os.windows.FALSE) {
+            return 0;
+        }
+        const width = @as(i32, info.srWindow.Right) - @as(i32, info.srWindow.Left) + 1;
+        if (width <= 0) return 0;
+        return @as(usize, @intCast(width));
+    } else {
+        var wsz: std.posix.winsize = .{
+            .row = 0,
+            .col = 0,
+            .xpixel = 0,
+            .ypixel = 0,
+        };
+        const rc = std.posix.system.ioctl(stdout_file.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&wsz));
+        if (std.posix.errno(rc) != .SUCCESS) return 0;
+        return @as(usize, wsz.col);
+    }
 }
 
 fn truncateAlloc(value: []const u8, max_len: usize) ![]u8 {
@@ -613,9 +650,8 @@ fn truncateAlloc(value: []const u8, max_len: usize) ![]u8 {
 
 fn formatTimestampAlloc(ts: i64) ![]u8 {
     if (ts < 0) return try std.fmt.allocPrint(std.heap.page_allocator, "-", .{});
-    var t: c.time_t = @intCast(ts);
     var tm: c.struct_tm = undefined;
-    if (c.localtime_r(&t, &tm) == null) {
+    if (!localtimeCompat(ts, &tm)) {
         return try std.fmt.allocPrint(std.heap.page_allocator, "-", .{});
     }
 
