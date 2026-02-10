@@ -264,6 +264,11 @@ fn localtimeCompat(ts: i64, out_tm: *c.struct_tm) bool {
     var t: c.time_t = @intCast(ts);
 
     if (comptime builtin.os.tag == .windows) {
+        // Use the exported CRT symbol first; localtime_s may be an inline wrapper.
+        if (comptime @hasDecl(c, "_localtime64_s") and @hasDecl(c, "__time64_t")) {
+            var t64: c.__time64_t = @intCast(ts);
+            return c._localtime64_s(out_tm, &t64) == 0;
+        }
         if (comptime @hasDecl(c, "localtime_s")) {
             return c.localtime_s(out_tm, &t) == 0;
         }
