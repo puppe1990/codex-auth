@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const registry = @import("registry.zig");
 const io_util = @import("io_util.zig");
 const timefmt = @import("timefmt.zig");
@@ -14,7 +15,7 @@ const ansi = struct {
 };
 
 fn colorEnabled() bool {
-    return std.posix.isatty(std.posix.STDOUT_FILENO);
+    return std.fs.File.stdout().isTty();
 }
 
 pub const OutputFormat = enum { table, json, csv, compact };
@@ -133,10 +134,16 @@ pub fn runCodexLogin(allocator: std.mem.Allocator) !void {
 }
 
 pub fn selectAccount(allocator: std.mem.Allocator, reg: *registry.Registry) !?[]const u8 {
-    return selectInteractive(allocator, reg) catch selectWithNumbers(reg);
+    return if (comptime builtin.os.tag == .windows)
+        selectWithNumbers(reg)
+    else
+        selectInteractive(allocator, reg) catch selectWithNumbers(reg);
 }
 
 pub fn selectAccountsToRemove(allocator: std.mem.Allocator, reg: *registry.Registry) !?[]usize {
+    if (comptime builtin.os.tag == .windows) {
+        return selectRemoveWithNumbers(allocator, reg);
+    }
     return selectRemoveInteractive(allocator, reg) catch selectRemoveWithNumbers(allocator, reg);
 }
 
@@ -726,19 +733,34 @@ const ResetParts = struct {
     }
 };
 
+fn localtimeCompat(ts: i64, out_tm: *c.struct_tm) bool {
+    var t: c.time_t = @intCast(ts);
+
+    if (comptime @hasDecl(c, "localtime_r")) {
+        return c.localtime_r(&t, out_tm) != null;
+    }
+
+    if (comptime @hasDecl(c, "localtime")) {
+        const tm_ptr = c.localtime(&t);
+        if (tm_ptr == null) return false;
+        out_tm.* = tm_ptr.*;
+        return true;
+    }
+
+    return false;
+}
+
 fn resetPartsAlloc(allocator: std.mem.Allocator, reset_at: i64, now: i64) !ResetParts {
-    var t: c.time_t = @intCast(reset_at);
     var tm: c.struct_tm = undefined;
-    if (c.localtime_r(&t, &tm) == null) {
+    if (!localtimeCompat(reset_at, &tm)) {
         return ResetParts{
             .time = try std.fmt.allocPrint(allocator, "-", .{}),
             .date = try std.fmt.allocPrint(allocator, "-", .{}),
             .same_day = true,
         };
     }
-    var now_t: c.time_t = @intCast(now);
     var now_tm: c.struct_tm = undefined;
-    if (c.localtime_r(&now_t, &now_tm) == null) {
+    if (!localtimeCompat(now, &now_tm)) {
         return ResetParts{
             .time = try std.fmt.allocPrint(allocator, "-", .{}),
             .date = try std.fmt.allocPrint(allocator, "-", .{}),
