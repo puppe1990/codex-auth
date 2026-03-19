@@ -44,16 +44,18 @@ Implement CPA-format auth import for `codex-auth`, ship it behind `import --cpa`
 ## Action items
 - [x] Add this plan file and keep implementation aligned with it.
 - [x] Add a temporary execution-lock section to `AGENTS.md` that points at this plan until the task is complete.
-- [ ] Commit the bootstrap changes and create a Draft PR targeting `main`.
-- [ ] Implement `import --cpa [<path>]` and the underlying CPA conversion/import flow.
-- [ ] Update docs and help text for the new flag and default source behavior.
-- [ ] Add or adjust tests for CPA parsing, import behavior, and CLI output.
-- [ ] Run local validation for the touched Zig code and supporting docs/tests.
+- [x] Commit the bootstrap changes and create a Draft PR targeting `main`.
+- [x] Implement `import --cpa [<path>]` and the underlying CPA conversion/import flow.
+- [x] Update docs and help text for the new flag and default source behavior.
+- [x] Add or adjust tests for CPA parsing, import behavior, and CLI output.
+- [x] Run local validation for the touched Zig code and supporting docs/tests.
 - [ ] Push implementation changes and process PR review comments plus CI until green.
 - [ ] Remove the temporary `AGENTS.md` execution lock once the work is complete and validated.
 
 ## Progress log
 - 2026-03-20: Captured the execution plan and locked `AGENTS.md` to it before any code changes.
+- 2026-03-20: Created bootstrap commit `3618744`, opened Draft PR #21, and captured the initial PR snapshot (CI pending, no review threads).
+- 2026-03-20: Implemented `import --cpa`, updated docs/tests, and passed `zig test src/main.zig -lc`, `zig build`, and `zig build run -- list`.
 
 ## Testing and validation
 - `zig test src/main.zig -lc`
