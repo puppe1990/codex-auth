@@ -11,10 +11,3 @@
 # Validation
 
 After modifying any `.zig` file, always run `zig build run -- list` to verify the changes work correctly.
-
-# Execution Lock
-
-- The active task for this branch must follow `plans/2026-03-20-import-cpa-auth.md`.
-- Keep that plan file updated with the current checklist state and progress log as the task advances.
-- Continue executing from the latest recorded progress in that plan until every checklist item is complete.
-- Remove this execution-lock section after the plan is fully completed and validated.
