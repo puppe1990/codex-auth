@@ -57,6 +57,8 @@ Implement CPA-format auth import for `codex-auth`, ship it behind `import --cpa`
 - 2026-03-20: Created bootstrap commit `3618744`, opened Draft PR #21, and captured the initial PR snapshot (CI pending, no review threads).
 - 2026-03-20: Implemented `import --cpa`, updated docs/tests, and passed `zig test src/main.zig -lc`, `zig build`, and `zig build run -- list`.
 - 2026-03-20: Pushed implementation commit `cbd3314`, waited for PR #21 checks to turn green, and confirmed there were still no unresolved review threads before cleanup.
+- 2026-03-20: Fixed the missing-default-CPA-source behavior in commit `a54aea9`, re-ran the PR loop, and confirmed PR #21 was green with no unresolved review threads.
+- 2026-03-20: Added a repeat-import CPA regression test during an extra branch-vs-`main` review pass and re-entered the PR loop for final verification.
 
 ## Testing and validation
 - `zig test src/main.zig -lc`

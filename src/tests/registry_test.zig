@@ -840,6 +840,38 @@ test "import cpa path with single file converts to standard auth and keeps expli
     try std.testing.expect(std.mem.indexOf(u8, snapshot_data, "\"refresh_token\": \"refresh-single-cpa@example.com\"") != null);
 }
 
+test "import cpa path with repeated single file reports updated on second import" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const codex_home = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(codex_home);
+    try tmp.dir.makePath("imports");
+
+    const cpa_json = try bdd.cpaJsonWithEmailPlan(gpa, "repeat-cpa@example.com", "pro");
+    defer gpa.free(cpa_json);
+    try tmp.dir.writeFile(.{ .sub_path = "imports/repeat.json", .data = cpa_json });
+
+    const import_path = try std.fs.path.join(gpa, &[_][]const u8{ codex_home, "imports", "repeat.json" });
+    defer gpa.free(import_path);
+
+    var reg = makeEmptyRegistry();
+    defer reg.deinit(gpa);
+
+    var first = try registry.importCpaPath(gpa, codex_home, &reg, import_path, null);
+    defer first.deinit(gpa);
+    try std.testing.expect(first.imported == 1);
+    try std.testing.expect(first.updated == 0);
+    try std.testing.expect(first.events.items[0].outcome == .imported);
+
+    var second = try registry.importCpaPath(gpa, codex_home, &reg, import_path, null);
+    defer second.deinit(gpa);
+    try std.testing.expect(second.imported == 0);
+    try std.testing.expect(second.updated == 1);
+    try std.testing.expect(second.events.items[0].outcome == .updated);
+}
+
 test "import cpa path with directory imports multiple json files and skips bad files" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
