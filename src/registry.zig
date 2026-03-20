@@ -925,7 +925,7 @@ pub fn importCpaPath(
         }
         const default_path = try defaultCpaImportPath(allocator);
         defer allocator.free(default_path);
-        return try importCpaDirectory(allocator, codex_home, reg, default_path, "~/.cli-proxy-api", true);
+        return try importCpaDirectory(allocator, codex_home, reg, default_path, "~/.cli-proxy-api", false);
     }
 
     const path = auth_path.?;

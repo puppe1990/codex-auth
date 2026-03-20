@@ -520,6 +520,25 @@ test "Scenario: Given cpa directory in default location when running import cpa 
     try std.testing.expectEqual(@as(usize, 2), loaded.accounts.items.len);
 }
 
+test "Scenario: Given missing default cpa directory when running import cpa then it fails" {
+    const gpa = std.testing.allocator;
+    const project_root = try projectRootAlloc(gpa);
+    defer gpa.free(project_root);
+    try buildCliBinary(gpa, project_root);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home_root = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(home_root);
+
+    const result = try runCliWithIsolatedHome(gpa, project_root, home_root, &[_][]const u8{ "import", "--cpa" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+
+    try expectFailure(result);
+}
+
 test "Scenario: Given cpa file import when running import cpa then it stores a standard auth snapshot" {
     const gpa = std.testing.allocator;
     const project_root = try projectRootAlloc(gpa);
