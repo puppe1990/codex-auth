@@ -89,6 +89,7 @@ fn runMain() !void {
 
 fn isHandledCliError(err: anyerror) bool {
     return err == error.AccountNotFound or
+        err == error.CodexLoginFailed or
         err == error.RemoveConfirmationUnavailable or
         err == error.RemoveSelectionRequiresTty or
         err == error.InvalidRemoveSelectionInput;
@@ -485,8 +486,7 @@ fn handleList(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.Li
 }
 
 fn handleLogin(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.LoginOptions) !void {
-    _ = opts;
-    try cli.runCodexLogin(allocator);
+    try cli.runCodexLogin(opts);
     const auth_path = try registry.activeAuthPath(allocator, codex_home);
     defer allocator.free(auth_path);
 

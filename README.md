@@ -23,7 +23,7 @@ For the best experience, install the Codex CLI even if you mainly use the VS Cod
 npm install -g @openai/codex
 ```
 
-After that, you can use `codex login` or `codex-auth login` to sign in and add accounts more easily.
+After that, you can use `codex login`, `codex login --device-auth`, `codex-auth login`, or `codex-auth login --device-auth` to sign in and add accounts more easily.
 
 ## Install
 
@@ -93,7 +93,7 @@ Remove-Item "$env:LOCALAPPDATA\codex-auth\bin\codex-auth-auto.exe" -Force -Error
 | Command | Description |
 |---------|-------------|
 | `codex-auth list` | List all accounts |
-| `codex-auth login` | Run `codex login`, then add the current account |
+| `codex-auth login [--device-auth]` | Run `codex login` (optionally with `--device-auth`), then add the current account |
 | `codex-auth switch [<email>]` | Switch active account interactively or by partial match |
 | `codex-auth remove` | Remove accounts with interactive multi-select |
 | `codex-auth status` | Show auto-switch, service, and usage status |
@@ -158,6 +158,7 @@ Add the currently logged-in Codex account:
 
 ```shell
 codex-auth login
+codex-auth login --device-auth
 ```
 
 ### Import

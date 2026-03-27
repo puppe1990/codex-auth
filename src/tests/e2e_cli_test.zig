@@ -87,6 +87,38 @@ fn runCliWithIsolatedHome(
     });
 }
 
+fn runCliWithIsolatedHomeAndPath(
+    allocator: std.mem.Allocator,
+    project_root: []const u8,
+    home_root: []const u8,
+    path_override: []const u8,
+    args: []const []const u8,
+) !std.process.Child.RunResult {
+    const exe_path = try builtCliPathAlloc(allocator, project_root);
+    defer allocator.free(exe_path);
+
+    var argv = std.ArrayList([]const u8).empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, exe_path);
+    try argv.appendSlice(allocator, args);
+
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+    try env_map.put("HOME", home_root);
+    try env_map.put("USERPROFILE", home_root);
+    try env_map.put("PATH", path_override);
+    try env_map.put("CODEX_AUTH_SKIP_SERVICE_RECONCILE", "1");
+    try env_map.put("CODEX_AUTH_DISABLE_BACKGROUND_ACCOUNT_NAME_REFRESH", "1");
+
+    return try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = argv.items,
+        .cwd = project_root,
+        .env_map = &env_map,
+        .max_output_bytes = 1024 * 1024,
+    });
+}
+
 fn runCliWithIsolatedHomeAndStdin(
     allocator: std.mem.Allocator,
     project_root: []const u8,
@@ -230,6 +262,62 @@ fn appendCustomAccount(
         .last_usage_at = null,
         .last_local_rollout = null,
     });
+}
+
+test "Scenario: Given failed device auth login with existing auth json when running login then it forwards the flag and does not mutate the registry" {
+    const gpa = std.testing.allocator;
+    const project_root = try projectRootAlloc(gpa);
+    defer gpa.free(project_root);
+    try buildCliBinary(gpa, project_root);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home_root = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(home_root);
+    try tmp.dir.makePath(".codex");
+    try tmp.dir.makePath("fake-bin");
+
+    const existing_auth = try bdd.authJsonWithEmailPlan(gpa, "existing@example.com", "plus");
+    defer gpa.free(existing_auth);
+    try tmp.dir.writeFile(.{ .sub_path = ".codex/auth.json", .data = existing_auth });
+
+    try tmp.dir.writeFile(.{ .sub_path = "fake-bin/codex", .data = "#!/bin/sh\nexit 9\n" });
+    {
+        var fake_codex = try tmp.dir.openFile("fake-bin/codex", .{ .mode = .read_write });
+        defer fake_codex.close();
+        try fake_codex.chmod(0o755);
+    }
+
+    const fake_bin_path = try std.fs.path.join(gpa, &[_][]const u8{ home_root, "fake-bin" });
+    defer gpa.free(fake_bin_path);
+    const path_override = try std.fmt.allocPrint(
+        gpa,
+        "{s}:/tmp/zig-0.15.1:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        .{fake_bin_path},
+    );
+    defer gpa.free(path_override);
+
+    const result = try runCliWithIsolatedHomeAndPath(
+        gpa,
+        project_root,
+        home_root,
+        path_override,
+        &[_][]const u8{ "login", "--device-auth" },
+    );
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+
+    try expectFailure(result);
+    try std.testing.expectEqualStrings("", result.stderr);
+
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(".codex/accounts/registry.json", .{}));
+
+    var active_auth_file = try tmp.dir.openFile(".codex/auth.json", .{});
+    defer active_auth_file.close();
+    const active_auth = try active_auth_file.readToEndAlloc(gpa, 10 * 1024 * 1024);
+    defer gpa.free(active_auth);
+    try std.testing.expectEqualStrings(existing_auth, active_auth);
 }
 
 // This simulates first-time use on v0.2 when ~/.codex/auth.json already exists

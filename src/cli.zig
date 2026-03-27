@@ -32,7 +32,9 @@ fn stderrColorEnabled() bool {
 }
 
 pub const ListOptions = struct {};
-pub const LoginOptions = struct {};
+pub const LoginOptions = struct {
+    device_auth: bool = false,
+};
 pub const ImportSource = enum { standard, cpa };
 pub const ImportOptions = struct {
     auth_path: ?[]u8,
@@ -132,7 +134,30 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Pars
     }
 
     if (std.mem.eql(u8, cmd, "login")) {
-        return try parseSimpleCommandArgs(allocator, "login", .login, .{ .login = .{} }, args[2..]);
+        if (args.len == 3 and isHelpFlag(std.mem.sliceTo(args[2], 0))) {
+            return .{ .command = .{ .help = .login } };
+        }
+
+        var opts: LoginOptions = .{};
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            const arg = std.mem.sliceTo(args[i], 0);
+            if (std.mem.eql(u8, arg, "--device-auth")) {
+                if (opts.device_auth) {
+                    return usageErrorResult(allocator, .login, "duplicate `--device-auth` for `login`.", .{});
+                }
+                opts.device_auth = true;
+                continue;
+            }
+            if (isHelpFlag(arg)) {
+                return usageErrorResult(allocator, .login, "`--help` must be used by itself for `login`.", .{});
+            }
+            if (std.mem.startsWith(u8, arg, "-")) {
+                return usageErrorResult(allocator, .login, "unknown flag `{s}` for `login`.", .{ arg });
+            }
+            return usageErrorResult(allocator, .login, "unexpected argument `{s}` for `login`.", .{ arg });
+        }
+        return .{ .command = .{ .login = opts } };
     }
 
     if (std.mem.eql(u8, cmd, "import")) {
@@ -640,7 +665,7 @@ fn commandDescriptionForTopic(topic: HelpTopic) []const u8 {
         .top_level => "Command-line account management for Codex.",
         .list => "List available accounts.",
         .status => "Show auto-switch, service, and usage API status.",
-        .login => "Run `codex login`, then add the current account.",
+        .login => "Run `codex login` or `codex login --device-auth`, then add the current account.",
         .import_auth => "Import auth files or rebuild the registry.",
         .switch_account => "Switch the active account interactively or by query.",
         .remove_account => "Remove one or more accounts.",
@@ -667,7 +692,10 @@ fn writeUsageSection(out: *std.Io.Writer, topic: HelpTopic) !void {
         },
         .list => try out.writeAll("  codex-auth list\n"),
         .status => try out.writeAll("  codex-auth status\n"),
-        .login => try out.writeAll("  codex-auth login\n"),
+        .login => {
+            try out.writeAll("  codex-auth login\n");
+            try out.writeAll("  codex-auth login --device-auth\n");
+        },
         .import_auth => {
             try out.writeAll("  codex-auth import <path> [--alias <alias>]\n");
             try out.writeAll("  codex-auth import --cpa [<path>] [--alias <alias>]\n");
@@ -708,7 +736,10 @@ fn writeExamplesSection(out: *std.Io.Writer, topic: HelpTopic) !void {
         },
         .list => try out.writeAll("  codex-auth list\n"),
         .status => try out.writeAll("  codex-auth status\n"),
-        .login => try out.writeAll("  codex-auth login\n"),
+        .login => {
+            try out.writeAll("  codex-auth login\n");
+            try out.writeAll("  codex-auth login --device-auth\n");
+        },
         .import_auth => {
             try out.writeAll("  codex-auth import /path/to/auth.json --alias personal\n");
             try out.writeAll("  codex-auth import --cpa /path/to/token.json --alias work\n");
@@ -992,16 +1023,33 @@ pub fn writeCodexLoginLaunchFailureHintTo(out: *std.Io.Writer, err_name: []const
     }
 }
 
-pub fn runCodexLogin(allocator: std.mem.Allocator) !void {
-    _ = allocator;
-    var child = std.process.Child.init(&[_][]const u8{ "codex", "login" }, std.heap.page_allocator);
+pub fn codexLoginArgs(opts: LoginOptions) []const []const u8 {
+    return if (opts.device_auth)
+        &[_][]const u8{ "codex", "login", "--device-auth" }
+    else
+        &[_][]const u8{ "codex", "login" };
+}
+
+fn ensureCodexLoginSucceeded(term: std.process.Child.Term) !void {
+    switch (term) {
+        .Exited => |code| {
+            if (code == 0) return;
+            return error.CodexLoginFailed;
+        },
+        else => return error.CodexLoginFailed,
+    }
+}
+
+pub fn runCodexLogin(opts: LoginOptions) !void {
+    var child = std.process.Child.init(codexLoginArgs(opts), std.heap.page_allocator);
     child.stdin_behavior = .Inherit;
     child.stdout_behavior = .Inherit;
     child.stderr_behavior = .Inherit;
-    _ = child.spawnAndWait() catch |err| {
+    const term = child.spawnAndWait() catch |err| {
         writeCodexLoginLaunchFailureHint(@errorName(err), stderrColorEnabled()) catch {};
         return err;
     };
+    try ensureCodexLoginSucceeded(term);
 }
 
 pub fn selectAccount(allocator: std.mem.Allocator, reg: *registry.Registry) !?[]const u8 {

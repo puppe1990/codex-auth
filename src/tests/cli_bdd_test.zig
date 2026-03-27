@@ -63,6 +63,13 @@ fn expectUsageError(result: cli.ParseResult, topic: cli.HelpTopic, contains: ?[]
     }
 }
 
+fn expectArgv(actual: []const []const u8, expected: []const []const u8) !void {
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |expected_arg, actual_arg| {
+        try std.testing.expectEqualStrings(expected_arg, actual_arg);
+    }
+}
+
 test "Scenario: Given import path and alias when parsing then import options are preserved" {
     const gpa = std.testing.allocator;
     const args = [_][:0]const u8{ "codex-auth", "import", "/tmp/auth.json", "--alias", "personal" };
@@ -175,6 +182,21 @@ test "Scenario: Given login with unknown flag when parsing then usage error is r
     defer cli.freeParseResult(gpa, &result);
 
     try expectUsageError(result, .login, "unknown flag");
+}
+
+test "Scenario: Given login with device auth flag when parsing then device auth is preserved" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "login", "--device-auth" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    switch (result) {
+        .command => |cmd| switch (cmd) {
+            .login => |opts| try std.testing.expect(opts.device_auth),
+            else => return error.TestExpectedEqual,
+        },
+        else => return error.TestExpectedEqual,
+    }
 }
 
 test "Scenario: Given command help selector when parsing then command-specific help is preserved" {
@@ -598,6 +620,22 @@ test "Scenario: Given codex login client missing when rendering then detection h
     const hint = aw.written();
     try std.testing.expect(std.mem.indexOf(u8, hint, "the `codex` executable was not found in your PATH.") != null);
     try std.testing.expect(std.mem.indexOf(u8, hint, "Ensure the Codex CLI is installed and available in your environment.") != null);
+}
+
+test "Scenario: Given login help when rendering then device auth usage is included" {
+    const gpa = std.testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+
+    try cli.writeCommandHelp(&aw.writer, false, .login);
+
+    const help = aw.written();
+    try std.testing.expect(std.mem.indexOf(u8, help, "codex-auth login --device-auth") != null);
+}
+
+test "Scenario: Given login options when building codex argv then device auth is forwarded" {
+    try expectArgv(cli.codexLoginArgs(.{}), &[_][]const u8{ "codex", "login" });
+    try expectArgv(cli.codexLoginArgs(.{ .device_auth = true }), &[_][]const u8{ "codex", "login", "--device-auth" });
 }
 
 test "Scenario: Given switch with positional query when parsing then non-interactive target is preserved" {
