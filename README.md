@@ -293,9 +293,7 @@ Upgrade notes:
 
 ### How to import tokens from cli-proxy-api?
 
-If you have token files from `~/.cli-proxy-api/token*.json`, this repository includes a helper script that can convert them into a format codex-auth can read.
-
-The CLI can also import the flat cli-proxy-api / CPA JSON files directly:
+The CLI imports flat cli-proxy-api / CPA JSON files directly:
 
 ```shell
 codex-auth import --cpa                  # default source: ~/.cli-proxy-api
@@ -304,21 +302,9 @@ codex-auth import --cpa /path/to/cpa-dir # scans direct child .json files
 
 Each CPA file is converted in memory to the standard auth snapshot shape before it is written into `~/.codex/accounts/`. Missing or empty `refresh_token` values are skipped as `MissingRefreshToken`.
 
-The script is not bundled in the published npm package, so run it from a clone of this repository:
+After import, switch if needed:
 
 ```shell
-# Convert: ~/.cli-proxy-api → /tmp/tokens
-python3 scripts/convert_tokens.sh
-
-# Or specify custom directories
-python3 scripts/convert_tokens.sh <source_dir> <output_dir>
-```
-
-Then import and switch:
-
-```shell
-codex-auth import /tmp/tokens/
-# or import the CPA files directly without a conversion step
 codex-auth import --cpa
 codex-auth switch
 ```
