@@ -57,6 +57,56 @@ fn builtCliPathAlloc(allocator: std.mem.Allocator, project_root: []const u8) ![]
     return std.fs.path.join(allocator, &[_][]const u8{ project_root, "zig-out", "bin", exe_name });
 }
 
+fn fakeCodexCommandPath() []const u8 {
+    return if (builtin.os.tag == .windows) "fake-bin/codex.cmd" else "fake-bin/codex";
+}
+
+fn writeFailingFakeCodex(dir: std.fs.Dir, exit_code: u8) !void {
+    var script_buf: [128]u8 = undefined;
+    const script = if (builtin.os.tag == .windows)
+        try std.fmt.bufPrint(&script_buf, "@echo off\r\n>\"%HOME%\\fake-codex-argv.txt\" echo %*\r\nexit /b {d}\r\n", .{exit_code})
+    else
+        try std.fmt.bufPrint(&script_buf, "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$HOME/fake-codex-argv.txt\"\nexit {d}\n", .{exit_code});
+    const sub_path = fakeCodexCommandPath();
+    try dir.writeFile(.{ .sub_path = sub_path, .data = script });
+
+    if (builtin.os.tag != .windows) {
+        var file = try dir.openFile(sub_path, .{ .mode = .read_write });
+        defer file.close();
+        try file.chmod(0o755);
+    }
+}
+
+fn writeSuccessfulFakeCodex(dir: std.fs.Dir) !void {
+    const script =
+        if (builtin.os.tag == .windows)
+            "@echo off\r\n" ++
+                ">\"%HOME%\\fake-codex-argv.txt\" echo %*\r\n" ++
+                "copy /Y \"%HOME%\\fake-auth.json\" \"%HOME%\\.codex\\auth.json\" >NUL\r\n" ++
+                "exit /b 0\r\n"
+        else
+            "#!/bin/sh\n" ++
+                "printf '%s\\n' \"$*\" > \"$HOME/fake-codex-argv.txt\"\n" ++
+                "cp \"$HOME/fake-auth.json\" \"$HOME/.codex/auth.json\"\n" ++
+                "exit 0\n";
+    const sub_path = fakeCodexCommandPath();
+    try dir.writeFile(.{ .sub_path = sub_path, .data = script });
+
+    if (builtin.os.tag != .windows) {
+        var file = try dir.openFile(sub_path, .{ .mode = .read_write });
+        defer file.close();
+        try file.chmod(0o755);
+    }
+}
+
+fn prependPathEntryAlloc(allocator: std.mem.Allocator, entry: []const u8) ![]u8 {
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
+    const inherited_path = env_map.get("PATH") orelse return allocator.dupe(u8, entry);
+    return try std.fmt.allocPrint(allocator, "{s}{c}{s}", .{ entry, std.fs.path.delimiter, inherited_path });
+}
+
 fn runCliWithIsolatedHome(
     allocator: std.mem.Allocator,
     project_root: []const u8,
@@ -264,6 +314,76 @@ fn appendCustomAccount(
     });
 }
 
+test "Scenario: Given device auth login when running login then it forwards the flag and imports the current account" {
+    const gpa = std.testing.allocator;
+    const project_root = try projectRootAlloc(gpa);
+    defer gpa.free(project_root);
+    try buildCliBinary(gpa, project_root);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home_root = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(home_root);
+    try tmp.dir.makePath(".codex");
+    try tmp.dir.makePath("fake-bin");
+
+    const expected_email = "device-auth@example.com";
+    const fake_auth = try bdd.authJsonWithEmailPlan(gpa, expected_email, "plus");
+    defer gpa.free(fake_auth);
+    try tmp.dir.writeFile(.{ .sub_path = "fake-auth.json", .data = fake_auth });
+    try writeSuccessfulFakeCodex(tmp.dir);
+
+    const fake_bin_path = try std.fs.path.join(gpa, &[_][]const u8{ home_root, "fake-bin" });
+    defer gpa.free(fake_bin_path);
+    const path_override = try prependPathEntryAlloc(gpa, fake_bin_path);
+    defer gpa.free(path_override);
+
+    const result = try runCliWithIsolatedHomeAndPath(
+        gpa,
+        project_root,
+        home_root,
+        path_override,
+        &[_][]const u8{ "login", "--device-auth" },
+    );
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+
+    try expectSuccess(result);
+    try std.testing.expectEqualStrings("", result.stdout);
+    try std.testing.expectEqualStrings("", result.stderr);
+
+    const argv_path = try std.fs.path.join(gpa, &[_][]const u8{ home_root, "fake-codex-argv.txt" });
+    defer gpa.free(argv_path);
+    const argv_data = try bdd.readFileAlloc(gpa, argv_path);
+    defer gpa.free(argv_data);
+    try std.testing.expect(std.mem.indexOf(u8, argv_data, "login --device-auth") != null);
+
+    const codex_home = try codexHomeAlloc(gpa, home_root);
+    defer gpa.free(codex_home);
+    var loaded = try registry.loadRegistry(gpa, codex_home);
+    defer loaded.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), loaded.accounts.items.len);
+    try std.testing.expect(loaded.active_account_key != null);
+    try std.testing.expect(std.mem.eql(u8, loaded.accounts.items[0].email, expected_email));
+
+    const expected_account_key = try bdd.accountKeyForEmailAlloc(gpa, expected_email);
+    defer gpa.free(expected_account_key);
+    try std.testing.expect(std.mem.eql(u8, loaded.active_account_key.?, expected_account_key));
+
+    const snapshot_path = try registry.accountAuthPath(gpa, codex_home, expected_account_key);
+    defer gpa.free(snapshot_path);
+    const snapshot_data = try bdd.readFileAlloc(gpa, snapshot_path);
+    defer gpa.free(snapshot_data);
+    try std.testing.expectEqualStrings(fake_auth, snapshot_data);
+
+    const active_auth_path = try authJsonPathAlloc(gpa, home_root);
+    defer gpa.free(active_auth_path);
+    const active_auth = try bdd.readFileAlloc(gpa, active_auth_path);
+    defer gpa.free(active_auth);
+    try std.testing.expectEqualStrings(fake_auth, active_auth);
+}
+
 test "Scenario: Given failed device auth login with existing auth json when running login then it forwards the flag and does not mutate the registry" {
     const gpa = std.testing.allocator;
     const project_root = try projectRootAlloc(gpa);
@@ -281,21 +401,11 @@ test "Scenario: Given failed device auth login with existing auth json when runn
     const existing_auth = try bdd.authJsonWithEmailPlan(gpa, "existing@example.com", "plus");
     defer gpa.free(existing_auth);
     try tmp.dir.writeFile(.{ .sub_path = ".codex/auth.json", .data = existing_auth });
-
-    try tmp.dir.writeFile(.{ .sub_path = "fake-bin/codex", .data = "#!/bin/sh\nexit 9\n" });
-    {
-        var fake_codex = try tmp.dir.openFile("fake-bin/codex", .{ .mode = .read_write });
-        defer fake_codex.close();
-        try fake_codex.chmod(0o755);
-    }
+    try writeFailingFakeCodex(tmp.dir, 9);
 
     const fake_bin_path = try std.fs.path.join(gpa, &[_][]const u8{ home_root, "fake-bin" });
     defer gpa.free(fake_bin_path);
-    const path_override = try std.fmt.allocPrint(
-        gpa,
-        "{s}:/tmp/zig-0.15.1:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        .{fake_bin_path},
-    );
+    const path_override = try prependPathEntryAlloc(gpa, fake_bin_path);
     defer gpa.free(path_override);
 
     const result = try runCliWithIsolatedHomeAndPath(
@@ -309,13 +419,20 @@ test "Scenario: Given failed device auth login with existing auth json when runn
     defer gpa.free(result.stderr);
 
     try expectFailure(result);
+    try std.testing.expectEqualStrings("", result.stdout);
     try std.testing.expectEqualStrings("", result.stderr);
+
+    const argv_path = try std.fs.path.join(gpa, &[_][]const u8{ home_root, "fake-codex-argv.txt" });
+    defer gpa.free(argv_path);
+    const argv_data = try bdd.readFileAlloc(gpa, argv_path);
+    defer gpa.free(argv_data);
+    try std.testing.expect(std.mem.indexOf(u8, argv_data, "login --device-auth") != null);
 
     try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(".codex/accounts/registry.json", .{}));
 
-    var active_auth_file = try tmp.dir.openFile(".codex/auth.json", .{});
-    defer active_auth_file.close();
-    const active_auth = try active_auth_file.readToEndAlloc(gpa, 10 * 1024 * 1024);
+    const active_auth_path = try authJsonPathAlloc(gpa, home_root);
+    defer gpa.free(active_auth_path);
+    const active_auth = try bdd.readFileAlloc(gpa, active_auth_path);
     defer gpa.free(active_auth);
     try std.testing.expectEqualStrings(existing_auth, active_auth);
 }

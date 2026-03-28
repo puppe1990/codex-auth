@@ -199,6 +199,15 @@ test "Scenario: Given login with device auth flag when parsing then device auth 
     }
 }
 
+test "Scenario: Given login with duplicate device auth flag when parsing then usage error is returned" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "login", "--device-auth", "--device-auth" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    try expectUsageError(result, .login, "duplicate `--device-auth`");
+}
+
 test "Scenario: Given command help selector when parsing then command-specific help is preserved" {
     const gpa = std.testing.allocator;
     const args = [_][:0]const u8{ "codex-auth", "help", "list" };

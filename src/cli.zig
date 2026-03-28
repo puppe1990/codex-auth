@@ -153,9 +153,9 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Pars
                 return usageErrorResult(allocator, .login, "`--help` must be used by itself for `login`.", .{});
             }
             if (std.mem.startsWith(u8, arg, "-")) {
-                return usageErrorResult(allocator, .login, "unknown flag `{s}` for `login`.", .{ arg });
+                return usageErrorResult(allocator, .login, "unknown flag `{s}` for `login`.", .{arg});
             }
-            return usageErrorResult(allocator, .login, "unexpected argument `{s}` for `login`.", .{ arg });
+            return usageErrorResult(allocator, .login, "unexpected argument `{s}` for `login`.", .{arg});
         }
         return .{ .command = .{ .login = opts } };
     }
