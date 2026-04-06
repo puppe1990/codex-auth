@@ -5,9 +5,9 @@
 `codex-auth` is a command-line tool for switching Codex accounts.
 
 > [!IMPORTANT]
-> For **Codex CLI** users, after switching accounts, you must fully exit `codex` (type `/exit` or close the terminal session) and start it again for the new account to take effect.
+> For **Codex CLI** and **Codex App** users, switch accounts, then restart the client for the new account to take effect.
 >
-> If you want seamless automatic account switching without restarting `codex`, use forked [codext](https://github.com/Loongphy/codext), but you need to build it yourself because there is no prebuilt install method yet.
+> If you use the CLI and want seamless automatic account switching without restarting, use the forked [`codext`](https://github.com/Loongphy/codext), an enhanced Codex CLI. Install it with `npm i -g @loongphy/codext` and run `codext`.
 
 ## Supported Platforms
 
@@ -39,7 +39,7 @@ npm install -g @loongphy/codex-auth
 npx @loongphy/codex-auth list
 ```
 
-  npm packages currently support Linux x64, macOS x64, macOS arm64, and Windows x64.
+  npm packages currently support Linux x64, macOS x64, macOS arm64, Windows x64, and Windows arm64.
 
 > [!NOTE]
 > If you only installed `@loongphy/codex-auth` with npm, you do not need any legacy cleanup steps.
