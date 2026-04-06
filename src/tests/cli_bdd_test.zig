@@ -166,6 +166,36 @@ test "Scenario: Given list with extra args when parsing then usage error is retu
     try expectUsageError(result, .list, "unexpected argument");
 }
 
+test "Scenario: Given list with refresh-all flag when parsing then the option is preserved" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "list", "--refresh-all" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    switch (result) {
+        .command => |cmd| switch (cmd) {
+            .list => |opts| try std.testing.expect(opts.refresh_all),
+            else => return error.TestExpectedEqual,
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "Scenario: Given refresh when parsing then refresh command is preserved" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "refresh" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    switch (result) {
+        .command => |cmd| switch (cmd) {
+            .refresh => {},
+            else => return error.TestExpectedEqual,
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
 test "Scenario: Given login with removed no-login flag when parsing then usage error is returned" {
     const gpa = std.testing.allocator;
     const args = [_][:0]const u8{ "codex-auth", "login", "--no-login" };
@@ -235,6 +265,8 @@ test "Scenario: Given help when rendering then login and command help notes are 
     try std.testing.expect(std.mem.indexOf(u8, help, "Auto Switch: ON (5h<12%, weekly<8%)") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "Usage API: ON (api)") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "Account API: ON") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "refresh") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "Refresh usage for all stored accounts") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "--cpa [<path>]") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "Run `codex-auth <command> --help` for command-specific usage details.") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "`config api enable` may trigger OpenAI account restrictions or suspension in some environments.") != null);
@@ -262,8 +294,22 @@ test "Scenario: Given simple command help when rendering then examples are omitt
 
     const help = aw.written();
     try std.testing.expect(std.mem.indexOf(u8, help, "codex-auth list") != null);
-    try std.testing.expect(std.mem.indexOf(u8, help, "List available accounts.") != null);
-    try std.testing.expect(std.mem.indexOf(u8, help, "Usage:\n  codex-auth list\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "List available accounts, optionally refreshing all stored quotas first.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "Usage:\n  codex-auth list\n  codex-auth list --refresh-all\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "Examples:") == null);
+}
+
+test "Scenario: Given refresh command help when rendering then usage is shown without examples" {
+    const gpa = std.testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+
+    try cli.writeCommandHelp(&aw.writer, false, .refresh);
+
+    const help = aw.written();
+    try std.testing.expect(std.mem.indexOf(u8, help, "codex-auth refresh") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "Refresh usage for all stored accounts.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "Usage:\n  codex-auth refresh\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "Examples:") == null);
 }
 

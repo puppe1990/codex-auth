@@ -41,6 +41,38 @@ fn appendAccount(
     });
 }
 
+fn setWeeklyWindow(rec: *registry.AccountRecord, remaining_percent: f64, resets_at: i64) void {
+    rec.last_usage = .{
+        .primary = null,
+        .secondary = .{
+            .used_percent = 100.0 - remaining_percent,
+            .window_minutes = 10080,
+            .resets_at = resets_at,
+        },
+        .credits = null,
+        .plan_type = rec.plan,
+    };
+    rec.last_usage_at = std.time.timestamp();
+}
+
+fn setUsageWindows(rec: *registry.AccountRecord, remaining_5h_percent: f64, remaining_weekly_percent: f64, weekly_resets_at: i64) void {
+    rec.last_usage = .{
+        .primary = .{
+            .used_percent = 100.0 - remaining_5h_percent,
+            .window_minutes = 300,
+            .resets_at = weekly_resets_at,
+        },
+        .secondary = .{
+            .used_percent = 100.0 - remaining_weekly_percent,
+            .window_minutes = 10080,
+            .resets_at = weekly_resets_at,
+        },
+        .credits = null,
+        .plan_type = rec.plan,
+    };
+    rec.last_usage_at = std.time.timestamp();
+}
+
 test "Scenario: Given same email with two team accounts and one plus account when building display rows then they are grouped and numbered" {
     const gpa = std.testing.allocator;
     var reg = makeRegistry();
@@ -169,4 +201,30 @@ test "Scenario: Given grouped accounts with account names when building display 
                 std.mem.eql(u8, rows.rows[2].account_cell, "work (Primary Workspace)")),
     );
     try std.testing.expect(std.mem.eql(u8, rows.rows[3].account_cell, "plus"));
+}
+
+test "Scenario: Given accounts with different weekly and 5h usage when building display rows then higher weekly usage comes first and ties use higher 5h usage" {
+    const gpa = std.testing.allocator;
+    var reg = makeRegistry();
+    defer reg.deinit(gpa);
+
+    const now = std.time.timestamp();
+    try appendAccount(gpa, &reg, "user-low-week::acct-low-week", "low-week@example.com", "", .plus);
+    try appendAccount(gpa, &reg, "user-mid-week-low-5h::acct-mid-week-low-5h", "mid-week-low-5h@example.com", "", .plus);
+    try appendAccount(gpa, &reg, "user-mid-week-high-5h::acct-mid-week-high-5h", "mid-week-high-5h@example.com", "", .team);
+    try appendAccount(gpa, &reg, "user-high-week::acct-high-week", "high-week@example.com", "", .team);
+
+    setUsageWindows(&reg.accounts.items[0], 90.0, 10.0, now + 7200);
+    setUsageWindows(&reg.accounts.items[1], 30.0, 60.0, now + 3600);
+    setUsageWindows(&reg.accounts.items[2], 75.0, 60.0, now + 10800);
+    setUsageWindows(&reg.accounts.items[3], 20.0, 85.0, now + 1800);
+
+    var rows = try display_rows.buildDisplayRows(gpa, &reg, null);
+    defer rows.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 4), rows.rows.len);
+    try std.testing.expect(std.mem.eql(u8, rows.rows[0].account_cell, "high-week@example.com"));
+    try std.testing.expect(std.mem.eql(u8, rows.rows[1].account_cell, "mid-week-high-5h@example.com"));
+    try std.testing.expect(std.mem.eql(u8, rows.rows[2].account_cell, "mid-week-low-5h@example.com"));
+    try std.testing.expect(std.mem.eql(u8, rows.rows[3].account_cell, "low-week@example.com"));
 }

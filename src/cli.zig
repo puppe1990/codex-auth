@@ -31,7 +31,10 @@ fn stderrColorEnabled() bool {
     return std.fs.File.stderr().isTty();
 }
 
-pub const ListOptions = struct {};
+pub const ListOptions = struct {
+    refresh_all: bool = false,
+};
+pub const RefreshOptions = struct {};
 pub const LoginOptions = struct {
     device_auth: bool = false,
 };
@@ -67,6 +70,7 @@ pub const DaemonOptions = struct { mode: DaemonMode };
 pub const HelpTopic = enum {
     top_level,
     list,
+    refresh,
     status,
     login,
     import_auth,
@@ -79,6 +83,7 @@ pub const HelpTopic = enum {
 
 pub const Command = union(enum) {
     list: ListOptions,
+    refresh: RefreshOptions,
     login: LoginOptions,
     import_auth: ImportOptions,
     switch_account: SwitchOptions,
@@ -130,7 +135,34 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Pars
     }
 
     if (std.mem.eql(u8, cmd, "list")) {
-        return try parseSimpleCommandArgs(allocator, "list", .list, .{ .list = .{} }, args[2..]);
+        if (args.len == 3 and isHelpFlag(std.mem.sliceTo(args[2], 0))) {
+            return .{ .command = .{ .help = .list } };
+        }
+
+        var opts: ListOptions = .{};
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            const arg = std.mem.sliceTo(args[i], 0);
+            if (std.mem.eql(u8, arg, "--refresh-all")) {
+                if (opts.refresh_all) {
+                    return usageErrorResult(allocator, .list, "duplicate `--refresh-all` for `list`.", .{});
+                }
+                opts.refresh_all = true;
+                continue;
+            }
+            if (isHelpFlag(arg)) {
+                return usageErrorResult(allocator, .list, "`--help` must be used by itself for `list`.", .{});
+            }
+            if (std.mem.startsWith(u8, arg, "-")) {
+                return usageErrorResult(allocator, .list, "unknown flag `{s}` for `list`.", .{arg});
+            }
+            return usageErrorResult(allocator, .list, "unexpected argument `{s}` for `list`.", .{arg});
+        }
+        return .{ .command = .{ .list = opts } };
+    }
+
+    if (std.mem.eql(u8, cmd, "refresh")) {
+        return try parseSimpleCommandArgs(allocator, "refresh", .refresh, .{ .refresh = .{} }, args[2..]);
     }
 
     if (std.mem.eql(u8, cmd, "login")) {
@@ -445,6 +477,7 @@ fn parseHelpArgs(allocator: std.mem.Allocator, rest: []const [:0]const u8) !Pars
 
 fn helpTopicForName(name: []const u8) ?HelpTopic {
     if (std.mem.eql(u8, name, "list")) return .list;
+    if (std.mem.eql(u8, name, "refresh")) return .refresh;
     if (std.mem.eql(u8, name, "status")) return .status;
     if (std.mem.eql(u8, name, "login")) return .login;
     if (std.mem.eql(u8, name, "import")) return .import_auth;
@@ -516,7 +549,8 @@ pub fn writeHelp(
 
     const commands = [_]HelpEntry{
         .{ .name = "--version, -V", .description = "Show version" },
-        .{ .name = "list", .description = "List available accounts" },
+        .{ .name = "list [--refresh-all]", .description = "List available accounts" },
+        .{ .name = "refresh", .description = "Refresh usage for all stored accounts" },
         .{ .name = "status", .description = "Show auto-switch and usage API status" },
         .{ .name = "login", .description = "Login and add the current account" },
         .{ .name = "import", .description = "Import auth files or rebuild registry" },
@@ -558,6 +592,7 @@ pub fn writeHelp(
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[6].name, commands[6].description);
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[7].name, commands[7].description);
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[8].name, commands[8].description);
+    try writeHelpEntry(out, use_color, parent_indent, command_col, commands[9].name, commands[9].description);
     try writeHelpEntry(out, use_color, child_indent, config_detail_col, config_details[0].name, config_details[0].description);
     try writeHelpEntry(out, use_color, child_indent, config_detail_col, config_details[1].name, config_details[1].description);
     try writeHelpEntry(out, use_color, child_indent, config_detail_col, config_details[2].name, config_details[2].description);
@@ -649,6 +684,7 @@ fn commandNameForTopic(topic: HelpTopic) []const u8 {
     return switch (topic) {
         .top_level => "",
         .list => "list",
+        .refresh => "refresh",
         .status => "status",
         .login => "login",
         .import_auth => "import",
@@ -663,7 +699,8 @@ fn commandNameForTopic(topic: HelpTopic) []const u8 {
 fn commandDescriptionForTopic(topic: HelpTopic) []const u8 {
     return switch (topic) {
         .top_level => "Command-line account management for Codex.",
-        .list => "List available accounts.",
+        .list => "List available accounts, optionally refreshing all stored quotas first.",
+        .refresh => "Refresh usage for all stored accounts.",
         .status => "Show auto-switch, service, and usage API status.",
         .login => "Run `codex login` or `codex login --device-auth`, then add the current account.",
         .import_auth => "Import auth files or rebuild the registry.",
@@ -690,7 +727,11 @@ fn writeUsageSection(out: *std.Io.Writer, topic: HelpTopic) !void {
             try out.writeAll("  codex-auth --help\n");
             try out.writeAll("  codex-auth help <command>\n");
         },
-        .list => try out.writeAll("  codex-auth list\n"),
+        .list => {
+            try out.writeAll("  codex-auth list\n");
+            try out.writeAll("  codex-auth list --refresh-all\n");
+        },
+        .refresh => try out.writeAll("  codex-auth refresh\n"),
         .status => try out.writeAll("  codex-auth status\n"),
         .login => {
             try out.writeAll("  codex-auth login\n");
@@ -731,10 +772,12 @@ fn writeExamplesSection(out: *std.Io.Writer, topic: HelpTopic) !void {
     switch (topic) {
         .top_level => {
             try out.writeAll("  codex-auth list\n");
+            try out.writeAll("  codex-auth refresh\n");
             try out.writeAll("  codex-auth import /path/to/auth.json --alias personal\n");
             try out.writeAll("  codex-auth config auto enable\n");
         },
         .list => try out.writeAll("  codex-auth list\n"),
+        .refresh => try out.writeAll("  codex-auth refresh\n"),
         .status => try out.writeAll("  codex-auth status\n"),
         .login => {
             try out.writeAll("  codex-auth login\n");
@@ -784,6 +827,7 @@ fn helpCommandForTopic(topic: HelpTopic) []const u8 {
     return switch (topic) {
         .top_level => "codex-auth --help",
         .list => "codex-auth list --help",
+        .refresh => "codex-auth refresh --help",
         .status => "codex-auth status --help",
         .login => "codex-auth login --help",
         .import_auth => "codex-auth import --help",

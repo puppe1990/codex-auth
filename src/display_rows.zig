@@ -28,17 +28,8 @@ pub fn buildDisplayRows(
     reg: *const registry.Registry,
     account_indices: ?[]const usize,
 ) !DisplayRows {
-    const source_len = if (account_indices) |indices| indices.len else reg.accounts.items.len;
-    var ordered = try allocator.alloc(usize, source_len);
+    var ordered = try sortedAccountIndicesAlloc(allocator, reg, account_indices);
     defer allocator.free(ordered);
-
-    if (account_indices) |indices| {
-        @memcpy(ordered, indices);
-    } else {
-        for (ordered, 0..) |*slot, idx| slot.* = idx;
-    }
-
-    std.sort.insertion(usize, ordered, SortContext{ .reg = reg }, lessThanByDisplayOrder);
 
     var row_list = std.ArrayList(DisplayRow).empty;
     errdefer for (row_list.items) |*row| row.deinit(allocator);
@@ -108,6 +99,24 @@ pub fn buildDisplayRows(
     };
 }
 
+pub fn sortedAccountIndicesAlloc(
+    allocator: std.mem.Allocator,
+    reg: *const registry.Registry,
+    account_indices: ?[]const usize,
+) ![]usize {
+    const source_len = if (account_indices) |indices| indices.len else reg.accounts.items.len;
+    const ordered = try allocator.alloc(usize, source_len);
+
+    if (account_indices) |indices| {
+        @memcpy(ordered, indices);
+    } else {
+        for (ordered, 0..) |*slot, idx| slot.* = idx;
+    }
+
+    std.sort.insertion(usize, ordered, SortContext{ .reg = reg }, lessThanByDisplayOrder);
+    return ordered;
+}
+
 const SortContext = struct {
     reg: *const registry.Registry,
 };
@@ -116,9 +125,26 @@ fn lessThanByDisplayOrder(ctx: SortContext, lhs: usize, rhs: usize) bool {
     const reg = ctx.reg;
     const a = &reg.accounts.items[lhs];
     const b = &reg.accounts.items[rhs];
+    const now = std.time.timestamp();
+
+    const a_group_week = groupWeeklyDisplaySortScore(reg, a.email, now);
+    const b_group_week = groupWeeklyDisplaySortScore(reg, b.email, now);
+    if (a_group_week != b_group_week) return a_group_week > b_group_week;
+
+    const a_group_5h = group5hDisplaySortScore(reg, a.email, now);
+    const b_group_5h = group5hDisplaySortScore(reg, b.email, now);
+    if (a_group_5h != b_group_5h) return a_group_5h > b_group_5h;
 
     const email_cmp = std.mem.order(u8, a.email, b.email);
     if (email_cmp != .eq) return email_cmp == .lt;
+
+    const a_week = weeklyDisplaySortScore(a, now);
+    const b_week = weeklyDisplaySortScore(b, now);
+    if (a_week != b_week) return a_week > b_week;
+
+    const a_5h = rate5hDisplaySortScore(a, now);
+    const b_5h = rate5hDisplaySortScore(b, now);
+    if (a_5h != b_5h) return a_5h > b_5h;
 
     const a_active = isActive(reg, lhs);
     const b_active = isActive(reg, rhs);
@@ -134,6 +160,32 @@ fn lessThanByDisplayOrder(ctx: SortContext, lhs: usize, rhs: usize) bool {
     if (plan_cmp != .eq) return plan_cmp == .lt;
 
     return std.mem.lessThan(u8, a.account_key, b.account_key);
+}
+
+fn groupWeeklyDisplaySortScore(reg: *const registry.Registry, email: []const u8, now: i64) i64 {
+    var best: i64 = std.math.minInt(i64);
+    for (reg.accounts.items) |rec| {
+        if (!std.mem.eql(u8, rec.email, email)) continue;
+        best = @max(best, weeklyDisplaySortScore(&rec, now));
+    }
+    return best;
+}
+
+fn group5hDisplaySortScore(reg: *const registry.Registry, email: []const u8, now: i64) i64 {
+    var best: i64 = std.math.minInt(i64);
+    for (reg.accounts.items) |rec| {
+        if (!std.mem.eql(u8, rec.email, email)) continue;
+        best = @max(best, rate5hDisplaySortScore(&rec, now));
+    }
+    return best;
+}
+
+fn weeklyDisplaySortScore(rec: *const registry.AccountRecord, now: i64) i64 {
+    return registry.remainingPercentAt(registry.resolveRateWindow(rec.last_usage, 10080, false), now) orelse std.math.minInt(i64);
+}
+
+fn rate5hDisplaySortScore(rec: *const registry.AccountRecord, now: i64) i64 {
+    return registry.remainingPercentAt(registry.resolveRateWindow(rec.last_usage, 300, true), now) orelse std.math.minInt(i64);
 }
 
 fn planSortRank(plan: ?registry.PlanType) u8 {

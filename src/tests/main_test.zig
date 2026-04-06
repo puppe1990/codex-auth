@@ -20,12 +20,16 @@ var mock_account_name_fetch_count: usize = 0;
 var mutate_registry_during_account_fetch = false;
 var mutate_registry_codex_home: ?[]const u8 = null;
 var expected_mock_account_name_fetch_account_id: ?[]const u8 = null;
+var refresh_alpha_auth_path: ?[]const u8 = null;
+var refresh_gamma_auth_path: ?[]const u8 = null;
 
 fn resetMockAccountNameFetcher() void {
     mock_account_name_fetch_count = 0;
     mutate_registry_during_account_fetch = false;
     mutate_registry_codex_home = null;
     expected_mock_account_name_fetch_account_id = null;
+    refresh_alpha_auth_path = null;
+    refresh_gamma_auth_path = null;
 }
 
 fn makeRegistry() registry.Registry {
@@ -272,6 +276,58 @@ fn mockAccountNameFetcherRequiringFreshToken(
 ) !account_api.FetchResult {
     if (!std.mem.eql(u8, access_token, "fresh-token")) return error.Unauthorized;
     return try mockAccountNameFetcher(allocator, access_token, account_id);
+}
+
+fn mockRefreshAllUsageFetcher(_: std.mem.Allocator, auth_path: []const u8) !@import("../usage_api.zig").UsageFetchResult {
+    if (refresh_alpha_auth_path) |path| {
+        if (std.mem.eql(u8, auth_path, path)) {
+            return .{
+                .snapshot = .{
+                    .primary = .{ .used_percent = 21.0, .window_minutes = 300, .resets_at = 1000 },
+                    .secondary = .{ .used_percent = 8.0, .window_minutes = 10080, .resets_at = 2000 },
+                    .credits = null,
+                    .plan_type = .plus,
+                },
+                .status_code = 200,
+            };
+        }
+    }
+    if (refresh_gamma_auth_path) |path| {
+        if (std.mem.eql(u8, auth_path, path)) {
+            return .{
+                .snapshot = .{
+                    .primary = .{ .used_percent = 44.0, .window_minutes = 300, .resets_at = 3000 },
+                    .secondary = .{ .used_percent = 11.0, .window_minutes = 10080, .resets_at = 4000 },
+                    .credits = null,
+                    .plan_type = .team,
+                },
+                .status_code = 200,
+            };
+        }
+    }
+    return error.TestUnexpectedAuthPath;
+}
+
+fn mockRefreshMixedUsageFetcher(_: std.mem.Allocator, auth_path: []const u8) !@import("../usage_api.zig").UsageFetchResult {
+    if (refresh_alpha_auth_path) |path| {
+        if (std.mem.eql(u8, auth_path, path)) {
+            return .{
+                .snapshot = .{
+                    .primary = .{ .used_percent = 21.0, .window_minutes = 300, .resets_at = 1000 },
+                    .secondary = .{ .used_percent = 8.0, .window_minutes = 10080, .resets_at = 2000 },
+                    .credits = null,
+                    .plan_type = .plus,
+                },
+                .status_code = 200,
+            };
+        }
+    }
+    if (refresh_gamma_auth_path) |path| {
+        if (std.mem.eql(u8, auth_path, path)) {
+            return .{ .snapshot = null, .status_code = 403 };
+        }
+    }
+    return error.TestUnexpectedAuthPath;
 }
 
 test "Scenario: Given alias, email, and account name queries when finding matching accounts then all matching strategies work" {
@@ -874,6 +930,175 @@ test "Scenario: Given no remaining accounts when reconciling after remove then a
     const active_auth_path = try registry.activeAuthPath(gpa, codex_home);
     defer gpa.free(active_auth_path);
     try std.testing.expectError(error.FileNotFound, std.fs.cwd().openFile(active_auth_path, .{}));
+}
+
+test "Scenario: Given stored account snapshots when refreshing all usage then every account is updated without switching auth" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const codex_home = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(codex_home);
+    try tmp.dir.makePath("accounts");
+
+    var reg = makeRegistry();
+    defer reg.deinit(gpa);
+
+    const alpha_key = try bdd.accountKeyForEmailAlloc(gpa, "alpha@example.com");
+    defer gpa.free(alpha_key);
+    const gamma_key = try bdd.accountKeyForEmailAlloc(gpa, "gamma@example.com");
+    defer gpa.free(gamma_key);
+    try appendAccount(gpa, &reg, alpha_key, "alpha@example.com", "", .plus);
+    try appendAccount(gpa, &reg, gamma_key, "gamma@example.com", "", .team);
+    try registry.setActiveAccountKey(gpa, &reg, alpha_key);
+
+    try writeSnapshot(gpa, codex_home, "alpha@example.com", "plus");
+    try writeSnapshot(gpa, codex_home, "gamma@example.com", "team");
+    try writeActiveAuthWithIds(
+        gpa,
+        codex_home,
+        "alpha@example.com",
+        "plus",
+        "user-alpha",
+        "acct-alpha",
+    );
+
+    refresh_alpha_auth_path = try registry.accountAuthPath(gpa, codex_home, alpha_key);
+    defer {
+        gpa.free(refresh_alpha_auth_path.?);
+        refresh_alpha_auth_path = null;
+    }
+    refresh_gamma_auth_path = try registry.accountAuthPath(gpa, codex_home, gamma_key);
+    defer {
+        gpa.free(refresh_gamma_auth_path.?);
+        refresh_gamma_auth_path = null;
+    }
+
+    var report = try main_mod.refreshAllAccountUsageWithFetcher(gpa, codex_home, &reg, mockRefreshAllUsageFetcher);
+    defer report.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 2), report.outcomes.items.len);
+    try std.testing.expectEqual(@as(usize, 2), report.updated);
+    try std.testing.expectEqual(@as(usize, 0), report.unchanged);
+    try std.testing.expectEqual(@as(usize, 0), report.unavailable);
+    try std.testing.expectEqual(@as(usize, 0), report.missing_auth);
+    try std.testing.expectEqual(@as(usize, 0), report.failed);
+    try std.testing.expectEqual(main_mod.RefreshAllUsageStatus.updated, report.outcomes.items[0].status);
+    try std.testing.expectEqual(main_mod.RefreshAllUsageStatus.updated, report.outcomes.items[1].status);
+    try std.testing.expectEqual(@as(f64, 21.0), reg.accounts.items[0].last_usage.?.primary.?.used_percent);
+    try std.testing.expectEqual(@as(f64, 44.0), reg.accounts.items[1].last_usage.?.primary.?.used_percent);
+    try std.testing.expect(reg.active_account_key != null);
+    try std.testing.expect(std.mem.eql(u8, reg.active_account_key.?, alpha_key));
+
+    const active_auth_path = try registry.activeAuthPath(gpa, codex_home);
+    defer gpa.free(active_auth_path);
+    const active_auth = try bdd.readFileAlloc(gpa, active_auth_path);
+    defer gpa.free(active_auth);
+    try std.testing.expect(std.mem.indexOf(u8, active_auth, "\"email\":\"alpha@example.com\"") != null);
+}
+
+test "Scenario: Given mixed refresh results when refreshing all usage then the report keeps per-account outcomes" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const codex_home = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(codex_home);
+    try tmp.dir.makePath("accounts");
+
+    var reg = makeRegistry();
+    defer reg.deinit(gpa);
+
+    const alpha_key = try bdd.accountKeyForEmailAlloc(gpa, "alpha@example.com");
+    defer gpa.free(alpha_key);
+    const gamma_key = try bdd.accountKeyForEmailAlloc(gpa, "gamma@example.com");
+    defer gpa.free(gamma_key);
+    try appendAccount(gpa, &reg, alpha_key, "alpha@example.com", "", .plus);
+    try appendAccount(gpa, &reg, gamma_key, "gamma@example.com", "", .team);
+
+    reg.accounts.items[0].last_usage = .{
+        .primary = .{ .used_percent = 21.0, .window_minutes = 300, .resets_at = 1000 },
+        .secondary = .{ .used_percent = 8.0, .window_minutes = 10080, .resets_at = 2000 },
+        .credits = null,
+        .plan_type = .plus,
+    };
+
+    try writeSnapshot(gpa, codex_home, "alpha@example.com", "plus");
+    try writeSnapshot(gpa, codex_home, "gamma@example.com", "team");
+
+    refresh_alpha_auth_path = try registry.accountAuthPath(gpa, codex_home, alpha_key);
+    defer {
+        gpa.free(refresh_alpha_auth_path.?);
+        refresh_alpha_auth_path = null;
+    }
+    refresh_gamma_auth_path = try registry.accountAuthPath(gpa, codex_home, gamma_key);
+    defer {
+        gpa.free(refresh_gamma_auth_path.?);
+        refresh_gamma_auth_path = null;
+    }
+
+    var report = try main_mod.refreshAllAccountUsageWithFetcher(gpa, codex_home, &reg, mockRefreshMixedUsageFetcher);
+    defer report.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 2), report.outcomes.items.len);
+    try std.testing.expectEqual(@as(usize, 0), report.updated);
+    try std.testing.expectEqual(@as(usize, 1), report.unchanged);
+    try std.testing.expectEqual(@as(usize, 1), report.unavailable);
+    try std.testing.expectEqual(@as(usize, 0), report.missing_auth);
+    try std.testing.expectEqual(@as(usize, 0), report.failed);
+    try std.testing.expectEqual(main_mod.RefreshAllUsageStatus.unchanged, report.outcomes.items[0].status);
+    try std.testing.expectEqual(main_mod.RefreshAllUsageStatus.unavailable, report.outcomes.items[1].status);
+    try std.testing.expectEqual(@as(?u16, 403), report.outcomes.items[1].status_code);
+    try std.testing.expectEqual(@as(f64, 21.0), reg.accounts.items[0].last_usage.?.primary.?.used_percent);
+    try std.testing.expect(reg.accounts.items[1].last_usage == null);
+}
+
+test "Scenario: Given refresh updates that change display priority when building the refresh report then outcomes follow the final display order" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const codex_home = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(codex_home);
+    try tmp.dir.makePath("accounts");
+
+    var reg = makeRegistry();
+    defer reg.deinit(gpa);
+
+    const alpha_key = try bdd.accountKeyForEmailAlloc(gpa, "alpha@example.com");
+    defer gpa.free(alpha_key);
+    const gamma_key = try bdd.accountKeyForEmailAlloc(gpa, "gamma@example.com");
+    defer gpa.free(gamma_key);
+
+    // Insert in the opposite order so the raw registry order differs from the final display order.
+    try appendAccount(gpa, &reg, gamma_key, "gamma@example.com", "", .team);
+    try appendAccount(gpa, &reg, alpha_key, "alpha@example.com", "", .plus);
+
+    try writeSnapshot(gpa, codex_home, "alpha@example.com", "plus");
+    try writeSnapshot(gpa, codex_home, "gamma@example.com", "team");
+
+    refresh_alpha_auth_path = try registry.accountAuthPath(gpa, codex_home, alpha_key);
+    defer {
+        gpa.free(refresh_alpha_auth_path.?);
+        refresh_alpha_auth_path = null;
+    }
+    refresh_gamma_auth_path = try registry.accountAuthPath(gpa, codex_home, gamma_key);
+    defer {
+        gpa.free(refresh_gamma_auth_path.?);
+        refresh_gamma_auth_path = null;
+    }
+
+    var report = try main_mod.refreshAllAccountUsageWithFetcher(gpa, codex_home, &reg, mockRefreshAllUsageFetcher);
+    defer report.deinit(gpa);
+
+    var rows = try display_rows.buildDisplayRows(gpa, &reg, null);
+    defer rows.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 2), report.outcomes.items.len);
+    try std.testing.expectEqualStrings("alpha@example.com", rows.rows[0].account_cell);
+    try std.testing.expectEqualStrings("gamma@example.com", rows.rows[1].account_cell);
+    try std.testing.expectEqualStrings(rows.rows[0].account_cell, report.outcomes.items[0].email);
+    try std.testing.expectEqualStrings(rows.rows[1].account_cell, report.outcomes.items[1].email);
 }
 
 test "Scenario: Given newer registry schema when loading help config then default help settings are used" {

@@ -5,7 +5,10 @@ const cli = @import("cli.zig");
 const registry = @import("registry.zig");
 const auth = @import("auth.zig");
 const auto = @import("auto.zig");
+const display_rows = @import("display_rows.zig");
 const format = @import("format.zig");
+const io_util = @import("io_util.zig");
+const usage_api = @import("usage_api.zig");
 
 const skip_service_reconcile_env = "CODEX_AUTH_SKIP_SERVICE_RECONCILE";
 const account_name_refresh_only_env = "CODEX_AUTH_REFRESH_ACCOUNT_NAMES_ONLY";
@@ -75,6 +78,7 @@ fn runMain() !void {
         },
         .config => |opts| try handleConfig(allocator, codex_home.?, opts),
         .list => |opts| try handleList(allocator, codex_home.?, opts),
+        .refresh => |opts| try handleRefresh(allocator, codex_home.?, opts),
         .login => |opts| try handleLogin(allocator, codex_home.?, opts),
         .import_auth => |opts| try handleImport(allocator, codex_home.?, opts),
         .switch_account => |opts| try handleSwitch(allocator, codex_home.?, opts),
@@ -92,7 +96,8 @@ fn isHandledCliError(err: anyerror) bool {
         err == error.CodexLoginFailed or
         err == error.RemoveConfirmationUnavailable or
         err == error.RemoveSelectionRequiresTty or
-        err == error.InvalidRemoveSelectionInput;
+        err == error.InvalidRemoveSelectionInput or
+        err == error.UsageApiDisabledForRefresh;
 }
 
 pub fn shouldReconcileManagedService(cmd: cli.Command) bool {
@@ -170,6 +175,35 @@ pub const HelpConfig = struct {
     api: registry.ApiConfig,
 };
 
+pub const RefreshAllUsageStatus = enum {
+    updated,
+    unchanged,
+    unavailable,
+    missing_auth,
+    failed,
+};
+
+pub const RefreshAllUsageOutcome = struct {
+    account_key: []const u8,
+    email: []const u8,
+    status: RefreshAllUsageStatus,
+    status_code: ?u16 = null,
+};
+
+pub const RefreshAllUsageReport = struct {
+    outcomes: std.ArrayList(RefreshAllUsageOutcome) = .empty,
+    updated: usize = 0,
+    unchanged: usize = 0,
+    unavailable: usize = 0,
+    missing_auth: usize = 0,
+    failed: usize = 0,
+
+    pub fn deinit(self: *RefreshAllUsageReport, allocator: std.mem.Allocator) void {
+        self.outcomes.deinit(allocator);
+        self.* = .{};
+    }
+};
+
 pub fn loadHelpConfig(allocator: std.mem.Allocator, codex_home: []const u8) HelpConfig {
     var reg = registry.loadRegistry(allocator, codex_home) catch {
         return .{
@@ -194,6 +228,121 @@ fn maybeRefreshForegroundUsage(
     if (try auto.refreshActiveUsage(allocator, codex_home, reg)) {
         try registry.saveRegistry(allocator, codex_home, reg);
     }
+}
+
+pub fn refreshAllAccountUsage(allocator: std.mem.Allocator, codex_home: []const u8, reg: *registry.Registry) !RefreshAllUsageReport {
+    return refreshAllAccountUsageWithFetcher(allocator, codex_home, reg, usage_api.fetchUsageForAuthPathDetailed);
+}
+
+pub fn refreshAllAccountUsageWithFetcher(
+    allocator: std.mem.Allocator,
+    codex_home: []const u8,
+    reg: *registry.Registry,
+    fetcher: anytype,
+) !RefreshAllUsageReport {
+    var report: RefreshAllUsageReport = .{};
+    errdefer report.deinit(allocator);
+
+    for (reg.accounts.items) |*rec| {
+        const auth_path = try registry.accountAuthPath(allocator, codex_home, rec.account_key);
+        defer allocator.free(auth_path);
+
+        const result = fetcher(allocator, auth_path) catch |err| {
+            std.log.warn("usage refresh skipped for {s}: {s}", .{ rec.email, @errorName(err) });
+            try report.outcomes.append(allocator, .{
+                .account_key = rec.account_key,
+                .email = rec.email,
+                .status = .failed,
+            });
+            report.failed += 1;
+            continue;
+        };
+
+        if (result.missing_auth) {
+            try report.outcomes.append(allocator, .{
+                .account_key = rec.account_key,
+                .email = rec.email,
+                .status = .missing_auth,
+                .status_code = result.status_code,
+            });
+            report.missing_auth += 1;
+            continue;
+        }
+
+        if (result.snapshot) |snapshot| {
+            var latest = snapshot;
+            if (registry.rateLimitSnapshotsEqual(rec.last_usage, latest)) {
+                registry.freeRateLimitSnapshot(allocator, &latest);
+                try report.outcomes.append(allocator, .{
+                    .account_key = rec.account_key,
+                    .email = rec.email,
+                    .status = .unchanged,
+                    .status_code = result.status_code,
+                });
+                report.unchanged += 1;
+                continue;
+            }
+
+            registry.updateUsage(allocator, reg, rec.account_key, latest);
+            try report.outcomes.append(allocator, .{
+                .account_key = rec.account_key,
+                .email = rec.email,
+                .status = .updated,
+                .status_code = result.status_code,
+            });
+            report.updated += 1;
+            continue;
+        }
+
+        try report.outcomes.append(allocator, .{
+            .account_key = rec.account_key,
+            .email = rec.email,
+            .status = .unavailable,
+            .status_code = result.status_code,
+        });
+        report.unavailable += 1;
+    }
+
+    sortRefreshUsageReport(reg, &report, allocator) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+    };
+    return report;
+}
+
+fn sortRefreshUsageReport(reg: *const registry.Registry, report: *RefreshAllUsageReport, allocator: std.mem.Allocator) !void {
+    if (report.outcomes.items.len <= 1) return;
+
+    const ordered_indices = try display_rows.sortedAccountIndicesAlloc(allocator, reg, null);
+    defer allocator.free(ordered_indices);
+
+    const ctx = RefreshOutcomeSortContext{
+        .reg = reg,
+        .ordered_indices = ordered_indices,
+    };
+    std.sort.insertion(RefreshAllUsageOutcome, report.outcomes.items, ctx, lessThanRefreshOutcomeByDisplayOrder);
+}
+
+const RefreshOutcomeSortContext = struct {
+    reg: *const registry.Registry,
+    ordered_indices: []const usize,
+};
+
+fn lessThanRefreshOutcomeByDisplayOrder(
+    ctx: RefreshOutcomeSortContext,
+    lhs: RefreshAllUsageOutcome,
+    rhs: RefreshAllUsageOutcome,
+) bool {
+    const lhs_rank = refreshOutcomeDisplayOrderRank(ctx, lhs.account_key);
+    const rhs_rank = refreshOutcomeDisplayOrderRank(ctx, rhs.account_key);
+    if (lhs_rank != rhs_rank) return lhs_rank < rhs_rank;
+    return std.mem.lessThan(u8, lhs.account_key, rhs.account_key);
+}
+
+fn refreshOutcomeDisplayOrderRank(ctx: RefreshOutcomeSortContext, account_key: []const u8) usize {
+    for (ctx.ordered_indices, 0..) |account_idx, order| {
+        if (std.mem.eql(u8, ctx.reg.accounts.items[account_idx].account_key, account_key)) return order;
+    }
+    return std.math.maxInt(usize);
 }
 
 fn defaultAccountFetcher(
@@ -472,17 +621,93 @@ fn loadSingleFileImportAuthInfo(
 }
 
 fn handleList(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.ListOptions) !void {
-    _ = opts;
     if (isAccountNameRefreshOnlyMode()) return try runBackgroundAccountNameRefresh(allocator, codex_home, defaultAccountFetcher);
 
     var reg = try registry.loadRegistry(allocator, codex_home);
     defer reg.deinit(allocator);
+    var changed = false;
     if (try registry.syncActiveAccountFromAuth(allocator, codex_home, &reg)) {
+        changed = true;
         try registry.saveRegistry(allocator, codex_home, &reg);
+    }
+    if (opts.refresh_all) {
+        if (!reg.api.usage) {
+            try printRefreshUsageApiDisabled();
+            return error.UsageApiDisabledForRefresh;
+        }
+        var report = try refreshAllAccountUsage(allocator, codex_home, &reg);
+        defer report.deinit(allocator);
+        if (report.updated > 0) changed = true;
+        if (changed) {
+            try registry.saveRegistry(allocator, codex_home, &reg);
+        }
+        try printRefreshUsageReport(&report);
     }
     try maybeRefreshForegroundUsage(allocator, codex_home, &reg, .list);
     try format.printAccounts(&reg);
     maybeSpawnBackgroundAccountNameRefresh(allocator, &reg);
+}
+
+fn refreshStatusLabel(status: RefreshAllUsageStatus) []const u8 {
+    return switch (status) {
+        .updated => "updated     ",
+        .unchanged => "unchanged   ",
+        .unavailable => "unavailable ",
+        .missing_auth => "missing-auth",
+        .failed => "failed      ",
+    };
+}
+
+fn printRefreshUsageApiDisabled() !void {
+    try std.fs.File.stderr().writeAll("Bulk quota refresh requires `codex-auth config api enable` because inactive accounts can only be refreshed through the usage API.\nRun `codex-auth config api enable`, then rerun `codex-auth refresh` or `codex-auth list --refresh-all`.\n");
+}
+
+fn printRefreshUsageReport(report: *const RefreshAllUsageReport) !void {
+    var stdout: io_util.Stdout = undefined;
+    stdout.init();
+    const out = stdout.out();
+
+    try out.print("Refreshed usage for {d} account(s).\n", .{report.outcomes.items.len});
+    for (report.outcomes.items) |outcome| {
+        try out.print("  {s} {s}", .{ refreshStatusLabel(outcome.status), outcome.email });
+        if (outcome.status_code) |status_code| {
+            if (outcome.status == .unavailable or outcome.status == .failed or outcome.status == .missing_auth) {
+                try out.print(" (HTTP {d})", .{status_code});
+            }
+        }
+        try out.writeAll("\n");
+    }
+    try out.print(
+        "Summary: {d} updated, {d} unchanged, {d} unavailable, {d} missing-auth, {d} failed\n\n",
+        .{ report.updated, report.unchanged, report.unavailable, report.missing_auth, report.failed },
+    );
+    try out.flush();
+}
+
+fn handleRefresh(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.RefreshOptions) !void {
+    _ = opts;
+
+    var reg = try registry.loadRegistry(allocator, codex_home);
+    defer reg.deinit(allocator);
+
+    var changed = false;
+    if (try registry.syncActiveAccountFromAuth(allocator, codex_home, &reg)) {
+        changed = true;
+    }
+    if (!reg.api.usage) {
+        try printRefreshUsageApiDisabled();
+        return error.UsageApiDisabledForRefresh;
+    }
+
+    var report = try refreshAllAccountUsage(allocator, codex_home, &reg);
+    defer report.deinit(allocator);
+    if (report.updated > 0) changed = true;
+    if (changed) {
+        try registry.saveRegistry(allocator, codex_home, &reg);
+    }
+
+    try printRefreshUsageReport(&report);
+    try format.printAccounts(&reg);
 }
 
 fn handleLogin(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.LoginOptions) !void {

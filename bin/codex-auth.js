@@ -40,6 +40,12 @@ if (maybePrintPreviewVersion(process.argv.slice(2))) {
 }
 
 function resolveBinary() {
+  const localBinaryName = process.platform === "win32" ? "codex-auth.exe" : "codex-auth";
+  const localBinaryPath = path.join(__dirname, "..", "zig-out", "bin", localBinaryName);
+  if (fs.existsSync(localBinaryPath)) {
+    return localBinaryPath;
+  }
+
   const key = `${process.platform}:${process.arch}`;
   const packageName = packageMap[key];
   if (!packageName) {
@@ -49,8 +55,7 @@ function resolveBinary() {
 
   try {
     const packageRoot = path.dirname(require.resolve(`${packageName}/package.json`));
-    const binaryName = process.platform === "win32" ? "codex-auth.exe" : "codex-auth";
-    const binaryPath = path.join(packageRoot, "bin", binaryName);
+    const binaryPath = path.join(packageRoot, "bin", localBinaryName);
     if (!fs.existsSync(binaryPath)) {
       console.error(`Missing binary inside ${packageName}: ${binaryPath}`);
       process.exit(1);
