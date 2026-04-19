@@ -112,7 +112,7 @@ Remove-Item "$env:LOCALAPPDATA\codex-auth\bin\codex-auth-auto.exe" -Force -Error
 | Command | Description |
 |---------|-------------|
 | `codex-auth config auto enable\|disable` | Enable or disable background auto-switching |
-| `codex-auth config auto [--5h <%>] [--weekly <%>]` | Set auto-switch thresholds |
+| `codex-auth config auto [--5h <%>] [--weekly <%>] [--choice\|--no-choice]` | Set auto-switch thresholds and candidate ranking mode |
 | `codex-auth config api enable\|disable` | Enable or disable both usage refresh and team name refresh API calls |
 
 ---
@@ -252,10 +252,25 @@ codex-auth config auto --5h 12 --weekly 8
 codex-auth config auto --weekly 8
 ```
 
+Enable the background candidate ranking mode that prefers the account with the highest 5h remaining usage, then breaks 5h ties by the weekly reset closest to `2026-04-17 16:28:00 -03:00`, then by the highest weekly remaining usage:
+
+```shell
+codex-auth config auto --choice
+codex-auth config auto --no-choice
+```
+
+`codex-auth status` shows `thresholds: ... , choice` when this ranking mode is active.
+
 When auto-switching is enabled, a long-running background watcher refreshes the active account's usage and silently switches accounts when:
 
 - 5h remaining drops below the configured 5h threshold (default `10%`), or
 - weekly remaining drops below the configured weekly threshold (default `5%`)
+
+When `--choice` is enabled, candidate selection runs silently in the background with this priority:
+
+- highest 5h remaining usage
+- weekly reset closest to `2026-04-17 16:28:00 -03:00`
+- highest weekly remaining usage
 
 The managed background worker is long-running on all supported platforms:
 

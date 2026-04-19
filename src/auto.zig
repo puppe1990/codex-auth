@@ -26,6 +26,7 @@ const lock_file_name = "auto-switch.lock";
 const watch_poll_interval_ns = 1 * std.time.ns_per_s;
 const api_refresh_interval_ns = 60 * std.time.ns_per_s;
 const free_plan_realtime_guard_5h_percent: i64 = 35;
+const choice_weekly_target_reset_at: i64 = 1776454080;
 pub const RuntimeState = enum { running, stopped, unknown };
 
 pub const Status = struct {
@@ -33,6 +34,7 @@ pub const Status = struct {
     runtime: RuntimeState,
     threshold_5h_percent: u8,
     threshold_weekly_percent: u8,
+    choice: bool,
     api_usage_enabled: bool,
     api_account_enabled: bool,
 };
@@ -47,6 +49,8 @@ pub const AutoSwitchAttempt = struct {
 
 const CandidateScore = struct {
     value: i64,
+    weekly_reset_distance: i64,
+    weekly_remaining: i64,
     last_usage_at: i64,
     created_at: i64,
 };
@@ -63,6 +67,7 @@ const CandidateIndex = struct {
     heap: std.ArrayListUnmanaged(CandidateEntry) = .empty,
     positions: std.StringHashMapUnmanaged(usize) = .empty,
     next_score_change_at: ?i64 = null,
+    choice: bool = false,
 
     fn deinit(self: *CandidateIndex, allocator: std.mem.Allocator) void {
         self.heap.deinit(allocator);
@@ -72,6 +77,7 @@ const CandidateIndex = struct {
 
     fn rebuild(self: *CandidateIndex, allocator: std.mem.Allocator, reg: *const registry.Registry, now: i64) !void {
         self.deinit(allocator);
+        self.choice = reg.auto_switch.choice;
         const active = reg.active_account_key;
         for (reg.accounts.items) |*rec| {
             if (active) |account_key| {
@@ -79,7 +85,7 @@ const CandidateIndex = struct {
             }
             try self.insert(allocator, .{
                 .account_key = rec.account_key,
-                .score = candidateScore(rec, now),
+                .score = candidateScore(rec, now, self.choice),
             });
         }
         self.refreshNextScoreChangeAt(reg, now);
@@ -142,7 +148,7 @@ const CandidateIndex = struct {
         };
         const entry: CandidateEntry = .{
             .account_key = reg.accounts.items[idx].account_key,
-            .score = candidateScore(&reg.accounts.items[idx], now),
+            .score = candidateScore(&reg.accounts.items[idx], now, self.choice),
         };
         if (self.positions.get(entry.account_key)) |heap_idx| {
             self.heap.items[heap_idx] = entry;
@@ -196,7 +202,7 @@ const CandidateIndex = struct {
         const right_idx = self.positions.get(rhs) orelse return false;
         const left = self.heap.items[left_idx].score;
         const right = self.heap.items[right_idx].score;
-        return candidateBetter(left, right);
+        return candidateBetter(left, right, self.choice);
     }
 
     fn restore(self: *CandidateIndex, idx: usize) void {
@@ -210,7 +216,7 @@ const CandidateIndex = struct {
         var moved = false;
         while (idx > 0) {
             const parent_idx = (idx - 1) / 2;
-            if (!candidateBetter(self.heap.items[idx].score, self.heap.items[parent_idx].score)) break;
+            if (!candidateBetter(self.heap.items[idx].score, self.heap.items[parent_idx].score, self.choice)) break;
             self.swap(idx, parent_idx);
             idx = parent_idx;
             moved = true;
@@ -225,10 +231,10 @@ const CandidateIndex = struct {
             if (left >= self.heap.items.len) break;
             const right = left + 1;
             var best_idx = left;
-            if (right < self.heap.items.len and candidateBetter(self.heap.items[right].score, self.heap.items[left].score)) {
+            if (right < self.heap.items.len and candidateBetter(self.heap.items[right].score, self.heap.items[left].score, self.choice)) {
                 best_idx = right;
             }
-            if (!candidateBetter(self.heap.items[best_idx].score, self.heap.items[idx].score)) break;
+            if (!candidateBetter(self.heap.items[best_idx].score, self.heap.items[idx].score, self.choice)) break;
             self.swap(idx, best_idx);
             idx = best_idx;
         }
@@ -542,6 +548,7 @@ pub fn getStatus(allocator: std.mem.Allocator, codex_home: []const u8) !Status {
         .runtime = queryRuntimeState(allocator),
         .threshold_5h_percent = reg.auto_switch.threshold_5h_percent,
         .threshold_weekly_percent = reg.auto_switch.threshold_weekly_percent,
+        .choice = reg.auto_switch.choice,
         .api_usage_enabled = reg.api.usage,
         .api_account_enabled = reg.api.account,
     };
@@ -566,6 +573,9 @@ fn writeStatusWithColor(out: *std.Io.Writer, status: Status, use_color: bool) !v
         "5h<{d}%, weekly<{d}%",
         .{ status.threshold_5h_percent, status.threshold_weekly_percent },
     );
+    if (status.choice) {
+        try out.writeAll(", choice");
+    }
     try out.writeAll("\n");
 
     try out.writeAll("usage: ");
@@ -1262,12 +1272,22 @@ fn applyLatestUsableSnapshotFromRolloutFile(
 
 pub fn bestAutoSwitchCandidateIndex(reg: *registry.Registry, now: i64) ?usize {
     const active = reg.active_account_key orelse return null;
+    return bestAccountIndex(reg, now, active);
+}
+
+pub fn bestChoiceAccountIndex(reg: *registry.Registry, now: i64) ?usize {
+    return bestAccountIndex(reg, now, null);
+}
+
+fn bestAccountIndex(reg: *registry.Registry, now: i64, skip_account_key: ?[]const u8) ?usize {
     var best_idx: ?usize = null;
     var best: ?CandidateScore = null;
     for (reg.accounts.items, 0..) |*rec, idx| {
-        if (std.mem.eql(u8, rec.account_key, active)) continue;
-        const score = candidateScore(rec, now);
-        if (best == null or candidateBetter(score, best.?)) {
+        if (skip_account_key) |account_key| {
+            if (std.mem.eql(u8, rec.account_key, account_key)) continue;
+        }
+        const score = candidateScore(rec, now, reg.auto_switch.choice);
+        if (best == null or candidateBetter(score, best.?, reg.auto_switch.choice)) {
             best = score;
             best_idx = idx;
         }
@@ -1329,7 +1349,7 @@ pub fn maybeAutoSwitchForDaemonWithUsageFetcher(
         .refreshed_candidates = false,
         .switched = false,
     };
-    const current = candidateScore(&reg.accounts.items[active_idx], now);
+    const current = candidateScore(&reg.accounts.items[active_idx], now, reg.auto_switch.choice);
     const should_switch_current = shouldSwitchCurrent(reg, now);
 
     var changed = false;
@@ -1383,7 +1403,7 @@ pub fn maybeAutoSwitchForDaemonWithUsageFetcher(
             .state_changed = changed,
             .switched = false,
         };
-        const candidate = candidateScore(&reg.accounts.items[candidate_idx], now);
+        const candidate = candidateScore(&reg.accounts.items[candidate_idx], now, reg.auto_switch.choice);
         if (candidate.value <= current.value) {
             return .{
                 .refreshed_candidates = refreshed_candidates,
@@ -1421,7 +1441,7 @@ pub fn maybeAutoSwitchForDaemonWithUsageFetcher(
         .state_changed = changed,
         .switched = false,
     };
-    const candidate = candidateScore(&reg.accounts.items[candidate_idx], now);
+    const candidate = candidateScore(&reg.accounts.items[candidate_idx], now, reg.auto_switch.choice);
     if (candidate.value <= current.value) {
         return .{
             .refreshed_candidates = refreshed_candidates,
@@ -1473,12 +1493,12 @@ fn maybeAutoSwitchWithUsageFetcherAndRefreshState(
         .refreshed_candidates = refreshed_candidates,
         .switched = false,
     };
-    const current = candidateScore(&reg.accounts.items[active_idx], now);
+    const current = candidateScore(&reg.accounts.items[active_idx], now, reg.auto_switch.choice);
     const candidate_idx = bestAutoSwitchCandidateIndex(reg, now) orelse return .{
         .refreshed_candidates = refreshed_candidates,
         .switched = false,
     };
-    const candidate = candidateScore(&reg.accounts.items[candidate_idx], now);
+    const candidate = candidateScore(&reg.accounts.items[candidate_idx], now, reg.auto_switch.choice);
     if (candidate.value <= current.value) {
         return .{
             .refreshed_candidates = refreshed_candidates,
@@ -1891,6 +1911,9 @@ pub fn applyThresholdConfig(cfg: *registry.AutoSwitchConfig, opts: cli.AutoThres
     if (opts.threshold_weekly_percent) |value| {
         cfg.threshold_weekly_percent = value;
     }
+    if (opts.choice) |value| {
+        cfg.choice = value;
+    }
 }
 
 fn configureThresholds(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.AutoThresholdOptions) !void {
@@ -1901,19 +1924,35 @@ fn configureThresholds(allocator: std.mem.Allocator, codex_home: []const u8, opt
     try printStatus(allocator, codex_home);
 }
 
-fn candidateScore(rec: *const registry.AccountRecord, now: i64) CandidateScore {
+fn candidateScore(rec: *const registry.AccountRecord, now: i64, choice: bool) CandidateScore {
     const usage_score = registry.usageScoreAt(rec.last_usage, now) orelse 100;
+    const weekly_window = registry.resolveRateWindow(rec.last_usage, 10080, false);
     return .{
         .value = usage_score,
+        .weekly_reset_distance = if (choice) weeklyResetDistance(weekly_window) else std.math.maxInt(i64),
+        .weekly_remaining = if (choice) (registry.remainingPercentAt(weekly_window, now) orelse -1) else -1,
         .last_usage_at = rec.last_usage_at orelse -1,
         .created_at = rec.created_at,
     };
 }
 
-fn candidateBetter(a: CandidateScore, b: CandidateScore) bool {
+fn candidateBetter(a: CandidateScore, b: CandidateScore, choice: bool) bool {
     if (a.value != b.value) return a.value > b.value;
+    if (choice) {
+        if (a.weekly_reset_distance != b.weekly_reset_distance) return a.weekly_reset_distance < b.weekly_reset_distance;
+        if (a.weekly_remaining != b.weekly_remaining) return a.weekly_remaining > b.weekly_remaining;
+    }
     if (a.last_usage_at != b.last_usage_at) return a.last_usage_at > b.last_usage_at;
     return a.created_at > b.created_at;
+}
+
+fn weeklyResetDistance(window: ?registry.RateLimitWindow) i64 {
+    const resets_at = if (window) |value| value.resets_at else null;
+    if (resets_at == null) return std.math.maxInt(i64);
+    if (resets_at.? >= choice_weekly_target_reset_at) {
+        return resets_at.? - choice_weekly_target_reset_at;
+    }
+    return choice_weekly_target_reset_at - resets_at.?;
 }
 
 fn candidateScoreChangeAt(usage: ?registry.RateLimitSnapshot, now: i64) ?i64 {

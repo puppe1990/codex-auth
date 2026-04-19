@@ -55,6 +55,7 @@ pub const AutoAction = enum { enable, disable };
 pub const AutoThresholdOptions = struct {
     threshold_5h_percent: ?u8,
     threshold_weekly_percent: ?u8,
+    choice: ?bool = null,
 };
 pub const AutoOptions = union(enum) {
     action: AutoAction,
@@ -74,6 +75,7 @@ pub const HelpTopic = enum {
     status,
     login,
     import_auth,
+    choice,
     switch_account,
     remove_account,
     clean,
@@ -86,6 +88,7 @@ pub const Command = union(enum) {
     refresh: RefreshOptions,
     login: LoginOptions,
     import_auth: ImportOptions,
+    choice: void,
     switch_account: SwitchOptions,
     remove_account: RemoveOptions,
     clean: CleanOptions,
@@ -163,6 +166,10 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Pars
 
     if (std.mem.eql(u8, cmd, "refresh")) {
         return try parseSimpleCommandArgs(allocator, "refresh", .refresh, .{ .refresh = .{} }, args[2..]);
+    }
+
+    if (std.mem.eql(u8, cmd, "choice")) {
+        return try parseSimpleCommandArgs(allocator, "choice", .choice, .{ .choice = {} }, args[2..]);
     }
 
     if (std.mem.eql(u8, cmd, "login")) {
@@ -340,6 +347,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Pars
 
             var threshold_5h_percent: ?u8 = null;
             var threshold_weekly_percent: ?u8 = null;
+            var choice: ?bool = null;
             var i: usize = 3;
             while (i < args.len) : (i += 1) {
                 const arg = std.mem.sliceTo(args[i], 0);
@@ -359,17 +367,28 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Pars
                     i += 1;
                     continue;
                 }
+                if (std.mem.eql(u8, arg, "--choice")) {
+                    if (choice != null) return usageErrorResult(allocator, .config, "duplicate `--choice` for `config auto`.", .{});
+                    choice = true;
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "--no-choice")) {
+                    if (choice != null) return usageErrorResult(allocator, .config, "duplicate `--no-choice` for `config auto`.", .{});
+                    choice = false;
+                    continue;
+                }
                 if (std.mem.eql(u8, arg, "enable") or std.mem.eql(u8, arg, "disable")) {
                     return usageErrorResult(allocator, .config, "`config auto` cannot mix actions with threshold flags.", .{});
                 }
                 return usageErrorResult(allocator, .config, "unknown argument `{s}` for `config auto`.", .{arg});
             }
-            if (threshold_5h_percent == null and threshold_weekly_percent == null) {
+            if (threshold_5h_percent == null and threshold_weekly_percent == null and choice == null) {
                 return usageErrorResult(allocator, .config, "`config auto` requires an action or threshold flags.", .{});
             }
             return .{ .command = .{ .config = .{ .auto_switch = .{ .configure = .{
                 .threshold_5h_percent = threshold_5h_percent,
                 .threshold_weekly_percent = threshold_weekly_percent,
+                .choice = choice,
             } } } } };
         }
 
@@ -416,6 +435,7 @@ fn freeCommand(allocator: std.mem.Allocator, cmd: *Command) void {
             if (opts.auth_path) |path| allocator.free(path);
             if (opts.alias) |a| allocator.free(a);
         },
+        .choice => {},
         .switch_account => |*opts| {
             if (opts.query) |e| allocator.free(e);
         },
@@ -481,6 +501,7 @@ fn helpTopicForName(name: []const u8) ?HelpTopic {
     if (std.mem.eql(u8, name, "status")) return .status;
     if (std.mem.eql(u8, name, "login")) return .login;
     if (std.mem.eql(u8, name, "import")) return .import_auth;
+    if (std.mem.eql(u8, name, "choice")) return .choice;
     if (std.mem.eql(u8, name, "switch")) return .switch_account;
     if (std.mem.eql(u8, name, "remove")) return .remove_account;
     if (std.mem.eql(u8, name, "clean")) return .clean;
@@ -522,8 +543,13 @@ pub fn writeHelp(
     try out.writeAll("Auto Switch:");
     if (use_color) try out.writeAll(ansi.reset);
     try out.print(
-        " {s} (5h<{d}%, weekly<{d}%)\n\n",
-        .{ if (auto_cfg.enabled) "ON" else "OFF", auto_cfg.threshold_5h_percent, auto_cfg.threshold_weekly_percent },
+        " {s} (5h<{d}%, weekly<{d}%{s})\n\n",
+        .{
+            if (auto_cfg.enabled) "ON" else "OFF",
+            auto_cfg.threshold_5h_percent,
+            auto_cfg.threshold_weekly_percent,
+            if (auto_cfg.choice) ", choice" else "",
+        },
     );
 
     if (use_color) try out.writeAll(ansi.bold);
@@ -551,6 +577,7 @@ pub fn writeHelp(
         .{ .name = "--version, -V", .description = "Show version" },
         .{ .name = "list [--refresh-all]", .description = "List available accounts" },
         .{ .name = "refresh", .description = "Refresh usage for all stored accounts" },
+        .{ .name = "choice", .description = "Choose the best account automatically" },
         .{ .name = "status", .description = "Show auto-switch and usage API status" },
         .{ .name = "login", .description = "Login and add the current account" },
         .{ .name = "import", .description = "Import auth files or rebuild registry" },
@@ -584,15 +611,16 @@ pub fn writeHelp(
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[2].name, commands[2].description);
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[3].name, commands[3].description);
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[4].name, commands[4].description);
+    try writeHelpEntry(out, use_color, parent_indent, command_col, commands[5].name, commands[5].description);
     try writeHelpEntry(out, use_color, child_indent, import_detail_col, import_details[0].name, import_details[0].description);
     try writeHelpEntry(out, use_color, child_indent, import_detail_col, import_details[1].name, import_details[1].description);
     try writeHelpEntry(out, use_color, child_indent, import_detail_col, import_details[2].name, import_details[2].description);
     try writeHelpEntry(out, use_color, child_indent, import_detail_col, import_details[3].name, import_details[3].description);
-    try writeHelpEntry(out, use_color, parent_indent, command_col, commands[5].name, commands[5].description);
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[6].name, commands[6].description);
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[7].name, commands[7].description);
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[8].name, commands[8].description);
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[9].name, commands[9].description);
+    try writeHelpEntry(out, use_color, parent_indent, command_col, commands[10].name, commands[10].description);
     try writeHelpEntry(out, use_color, child_indent, config_detail_col, config_details[0].name, config_details[0].description);
     try writeHelpEntry(out, use_color, child_indent, config_detail_col, config_details[1].name, config_details[1].description);
     try writeHelpEntry(out, use_color, child_indent, config_detail_col, config_details[2].name, config_details[2].description);
@@ -685,6 +713,7 @@ fn commandNameForTopic(topic: HelpTopic) []const u8 {
         .top_level => "",
         .list => "list",
         .refresh => "refresh",
+        .choice => "choice",
         .status => "status",
         .login => "login",
         .import_auth => "import",
@@ -701,6 +730,7 @@ fn commandDescriptionForTopic(topic: HelpTopic) []const u8 {
         .top_level => "Command-line account management for Codex.",
         .list => "List available accounts, optionally refreshing all stored quotas first.",
         .refresh => "Refresh usage for all stored accounts.",
+        .choice => "Choose the best account automatically and activate it.",
         .status => "Show auto-switch, service, and usage API status.",
         .login => "Run `codex login` or `codex login --device-auth`, then add the current account.",
         .import_auth => "Import auth files or rebuild the registry.",
@@ -715,6 +745,7 @@ fn commandDescriptionForTopic(topic: HelpTopic) []const u8 {
 fn commandHelpHasExamples(topic: HelpTopic) bool {
     return switch (topic) {
         .import_auth, .switch_account, .remove_account, .config, .daemon => true,
+        .choice => false,
         else => false,
     };
 }
@@ -732,6 +763,7 @@ fn writeUsageSection(out: *std.Io.Writer, topic: HelpTopic) !void {
             try out.writeAll("  codex-auth list --refresh-all\n");
         },
         .refresh => try out.writeAll("  codex-auth refresh\n"),
+        .choice => try out.writeAll("  codex-auth choice\n"),
         .status => try out.writeAll("  codex-auth status\n"),
         .login => {
             try out.writeAll("  codex-auth login\n");
@@ -757,6 +789,8 @@ fn writeUsageSection(out: *std.Io.Writer, topic: HelpTopic) !void {
             try out.writeAll("  codex-auth config auto disable\n");
             try out.writeAll("  codex-auth config auto --5h <percent> [--weekly <percent>]\n");
             try out.writeAll("  codex-auth config auto --weekly <percent>\n");
+            try out.writeAll("  codex-auth config auto --choice\n");
+            try out.writeAll("  codex-auth config auto --no-choice\n");
             try out.writeAll("  codex-auth config api enable\n");
             try out.writeAll("  codex-auth config api disable\n");
         },
@@ -778,6 +812,7 @@ fn writeExamplesSection(out: *std.Io.Writer, topic: HelpTopic) !void {
         },
         .list => try out.writeAll("  codex-auth list\n"),
         .refresh => try out.writeAll("  codex-auth refresh\n"),
+        .choice => try out.writeAll("  codex-auth choice\n"),
         .status => try out.writeAll("  codex-auth status\n"),
         .login => {
             try out.writeAll("  codex-auth login\n");
@@ -800,6 +835,7 @@ fn writeExamplesSection(out: *std.Io.Writer, topic: HelpTopic) !void {
         .clean => try out.writeAll("  codex-auth clean\n"),
         .config => {
             try out.writeAll("  codex-auth config auto --5h 12 --weekly 8\n");
+            try out.writeAll("  codex-auth config auto --choice\n");
             try out.writeAll("  codex-auth config api enable\n");
         },
         .daemon => {
@@ -828,6 +864,7 @@ fn helpCommandForTopic(topic: HelpTopic) []const u8 {
         .top_level => "codex-auth --help",
         .list => "codex-auth list --help",
         .refresh => "codex-auth refresh --help",
+        .choice => "codex-auth choice --help",
         .status => "codex-auth status --help",
         .login => "codex-auth login --help",
         .import_auth => "codex-auth import --help",

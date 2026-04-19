@@ -81,6 +81,7 @@ fn runMain() !void {
         .refresh => |opts| try handleRefresh(allocator, codex_home.?, opts),
         .login => |opts| try handleLogin(allocator, codex_home.?, opts),
         .import_auth => |opts| try handleImport(allocator, codex_home.?, opts),
+        .choice => try handleChoice(allocator, codex_home.?),
         .switch_account => |opts| try handleSwitch(allocator, codex_home.?, opts),
         .remove_account => |opts| try handleRemove(allocator, codex_home.?, opts),
         .clean => |_| try handleClean(allocator, codex_home.?),
@@ -806,6 +807,46 @@ fn handleSwitch(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.
     try registry.activateAccountByKey(allocator, codex_home, &reg, account_key);
     try registry.saveRegistry(allocator, codex_home, &reg);
     maybeSpawnBackgroundAccountNameRefresh(allocator, &reg);
+}
+
+fn handleChoice(allocator: std.mem.Allocator, codex_home: []const u8) !void {
+    var reg = try registry.loadRegistry(allocator, codex_home);
+    defer reg.deinit(allocator);
+    if (try registry.syncActiveAccountFromAuth(allocator, codex_home, &reg)) {
+        try registry.saveRegistry(allocator, codex_home, &reg);
+    }
+
+    const best_idx = auto.bestChoiceAccountIndex(&reg, std.time.timestamp()) orelse {
+        try printChoiceResult("No accounts available.\n");
+        return;
+    };
+    const best_account_key = reg.accounts.items[best_idx].account_key;
+    const best_email = reg.accounts.items[best_idx].email;
+
+    if (reg.active_account_key) |active_account_key| {
+        if (std.mem.eql(u8, active_account_key, best_account_key)) {
+            try printChoiceResult("Best account already active.\n");
+            return;
+        }
+    }
+
+    try registry.activateAccountByKey(allocator, codex_home, &reg, best_account_key);
+    try registry.saveRegistry(allocator, codex_home, &reg);
+    maybeSpawnBackgroundAccountNameRefresh(allocator, &reg);
+
+    var stdout: io_util.Stdout = undefined;
+    stdout.init();
+    const out = stdout.out();
+    try out.print("Switched to {s}\n", .{best_email});
+    try out.flush();
+}
+
+fn printChoiceResult(message: []const u8) !void {
+    var stdout: io_util.Stdout = undefined;
+    stdout.init();
+    const out = stdout.out();
+    try out.writeAll(message);
+    try out.flush();
 }
 
 fn handleConfig(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.ConfigOptions) !void {

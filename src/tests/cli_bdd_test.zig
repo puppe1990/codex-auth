@@ -267,6 +267,8 @@ test "Scenario: Given help when rendering then login and command help notes are 
     try std.testing.expect(std.mem.indexOf(u8, help, "Account API: ON") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "refresh") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "Refresh usage for all stored accounts") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "choice") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "Choose the best account automatically") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "--cpa [<path>]") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "Run `codex-auth <command> --help` for command-specific usage details.") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "`config api enable` may trigger OpenAI account restrictions or suspension in some environments.") != null);
@@ -310,6 +312,20 @@ test "Scenario: Given refresh command help when rendering then usage is shown wi
     try std.testing.expect(std.mem.indexOf(u8, help, "codex-auth refresh") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "Refresh usage for all stored accounts.") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "Usage:\n  codex-auth refresh\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "Examples:") == null);
+}
+
+test "Scenario: Given choice command help when rendering then usage is shown without examples" {
+    const gpa = std.testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+
+    try cli.writeCommandHelp(&aw.writer, false, .choice);
+
+    const help = aw.written();
+    try std.testing.expect(std.mem.indexOf(u8, help, "codex-auth choice") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "Choose the best account automatically and activate it.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "Usage:\n  codex-auth choice\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "Examples:") == null);
 }
 
@@ -433,6 +449,54 @@ test "Scenario: Given config auto thresholds together when parsing then both win
                         try std.testing.expect(cfg.threshold_5h_percent.? == 12);
                         try std.testing.expect(cfg.threshold_weekly_percent != null);
                         try std.testing.expect(cfg.threshold_weekly_percent.? == 8);
+                    },
+                    else => return error.TestExpectedEqual,
+                },
+                else => return error.TestExpectedEqual,
+            },
+            else => return error.TestExpectedEqual,
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "Scenario: Given config auto choice when parsing then choice mode is preserved" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "config", "auto", "--choice" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    switch (result) {
+        .command => |cmd| switch (cmd) {
+            .config => |opts| switch (opts) {
+                .auto_switch => |auto_opts| switch (auto_opts) {
+                    .configure => |cfg| {
+                        try std.testing.expect(cfg.choice != null);
+                        try std.testing.expect(cfg.choice.?);
+                    },
+                    else => return error.TestExpectedEqual,
+                },
+                else => return error.TestExpectedEqual,
+            },
+            else => return error.TestExpectedEqual,
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "Scenario: Given config auto no-choice when parsing then standard mode is preserved" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "config", "auto", "--no-choice" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    switch (result) {
+        .command => |cmd| switch (cmd) {
+            .config => |opts| switch (opts) {
+                .auto_switch => |auto_opts| switch (auto_opts) {
+                    .configure => |cfg| {
+                        try std.testing.expect(cfg.choice != null);
+                        try std.testing.expect(!cfg.choice.?);
                     },
                     else => return error.TestExpectedEqual,
                 },
@@ -705,6 +769,21 @@ test "Scenario: Given switch with positional query when parsing then non-interac
                 try std.testing.expect(opts.query != null);
                 try std.testing.expect(std.mem.eql(u8, opts.query.?, "user@example.com"));
             },
+            else => return error.TestExpectedEqual,
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "Scenario: Given choice when parsing then automatic selection command is preserved" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "choice" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    switch (result) {
+        .command => |cmd| switch (cmd) {
+            .choice => {},
             else => return error.TestExpectedEqual,
         },
         else => return error.TestExpectedEqual,

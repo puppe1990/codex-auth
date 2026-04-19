@@ -49,6 +49,7 @@ pub const AutoSwitchConfig = struct {
     enabled: bool = false,
     threshold_5h_percent: u8 = default_auto_switch_threshold_5h_percent,
     threshold_weekly_percent: u8 = default_auto_switch_threshold_weekly_percent,
+    choice: bool = false,
 };
 
 pub const ApiConfig = struct {
@@ -2565,6 +2566,12 @@ fn parseAutoSwitch(allocator: std.mem.Allocator, cfg: *AutoSwitchConfig, v: std.
     if (obj.get("threshold_weekly_percent")) |threshold| {
         if (parseThresholdPercent(threshold)) |value| {
             cfg.threshold_weekly_percent = value;
+        }
+    }
+    if (obj.get("choice")) |choice| {
+        switch (choice) {
+            .bool => |flag| cfg.choice = flag,
+            else => {},
         }
     }
 }

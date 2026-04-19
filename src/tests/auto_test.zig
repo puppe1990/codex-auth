@@ -726,6 +726,50 @@ test "Scenario: Given threshold overrides when applying config then unspecified 
     try std.testing.expect(cfg.threshold_weekly_percent == 7);
 }
 
+test "Scenario: Given choice override when applying config then choice mode is updated" {
+    var cfg = registry.defaultAutoSwitchConfig();
+
+    auto.applyThresholdConfig(&cfg, .{
+        .threshold_5h_percent = null,
+        .threshold_weekly_percent = null,
+        .choice = true,
+    });
+
+    try std.testing.expect(cfg.choice);
+}
+
+test "Scenario: Given equal 5h candidates in choice mode when selecting auto candidate then weekly reset nearest the target wins" {
+    const gpa = std.testing.allocator;
+    var reg = bdd.makeEmptyRegistry();
+    defer reg.deinit(gpa);
+    reg.auto_switch.choice = true;
+
+    try appendAccountWithUsage(gpa, &reg, "active@example.com", .{
+        .primary = .{ .used_percent = 95.0, .window_minutes = 300, .resets_at = null },
+        .secondary = .{ .used_percent = 90.0, .window_minutes = 10080, .resets_at = 1776400000 },
+        .credits = null,
+        .plan_type = null,
+    }, 100);
+    try appendAccountWithUsage(gpa, &reg, "far@example.com", .{
+        .primary = .{ .used_percent = 10.0, .window_minutes = 300, .resets_at = null },
+        .secondary = .{ .used_percent = 20.0, .window_minutes = 10080, .resets_at = 1776200000 },
+        .credits = null,
+        .plan_type = null,
+    }, 200);
+    try appendAccountWithUsage(gpa, &reg, "near@example.com", .{
+        .primary = .{ .used_percent = 10.0, .window_minutes = 300, .resets_at = null },
+        .secondary = .{ .used_percent = 5.0, .window_minutes = 10080, .resets_at = 1776454100 },
+        .credits = null,
+        .plan_type = null,
+    }, 300);
+    const active_account_key = try bdd.accountKeyForEmailAlloc(gpa, "active@example.com");
+    defer gpa.free(active_account_key);
+    try registry.setActiveAccountKey(gpa, &reg, active_account_key);
+
+    const idx = auto.bestAutoSwitchCandidateIndex(&reg, std.time.timestamp()) orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.eql(u8, reg.accounts.items[idx].email, "near@example.com"));
+}
+
 test "Scenario: Given better candidate when auto switch runs then auth and active account move silently" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -1590,6 +1634,7 @@ test "Scenario: Given status when rendering then auto and usage api settings are
         .runtime = .running,
         .threshold_5h_percent = 12,
         .threshold_weekly_percent = 8,
+        .choice = false,
         .api_usage_enabled = false,
         .api_account_enabled = false,
     });
@@ -1613,6 +1658,7 @@ test "Scenario: Given api usage mode when rendering status body then risk warnin
         .runtime = .running,
         .threshold_5h_percent = 12,
         .threshold_weekly_percent = 8,
+        .choice = false,
         .api_usage_enabled = true,
         .api_account_enabled = true,
     });
