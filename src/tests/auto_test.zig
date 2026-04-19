@@ -770,6 +770,51 @@ test "Scenario: Given equal 5h candidates in choice mode when selecting auto can
     try std.testing.expect(std.mem.eql(u8, reg.accounts.items[idx].email, "near@example.com"));
 }
 
+test "Scenario: Given zero-5h account in choice mode when selecting best choice then it is skipped" {
+    const gpa = std.testing.allocator;
+    var reg = bdd.makeEmptyRegistry();
+    defer reg.deinit(gpa);
+    reg.auto_switch.choice = true;
+
+    try appendAccountWithUsage(gpa, &reg, "empty@example.com", .{
+        .primary = .{ .used_percent = 100.0, .window_minutes = 300, .resets_at = null },
+        .secondary = .{ .used_percent = 5.0, .window_minutes = 10080, .resets_at = 1776454100 },
+        .credits = null,
+        .plan_type = null,
+    }, 100);
+    try appendAccountWithUsage(gpa, &reg, "available@example.com", .{
+        .primary = .{ .used_percent = 20.0, .window_minutes = 300, .resets_at = null },
+        .secondary = .{ .used_percent = 20.0, .window_minutes = 10080, .resets_at = 1776454100 },
+        .credits = null,
+        .plan_type = null,
+    }, 200);
+
+    const idx = auto.bestChoiceAccountIndex(&reg, std.time.timestamp()) orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.eql(u8, reg.accounts.items[idx].email, "available@example.com"));
+}
+
+test "Scenario: Given all accounts with zero 5h in choice mode when selecting best choice then no account is available" {
+    const gpa = std.testing.allocator;
+    var reg = bdd.makeEmptyRegistry();
+    defer reg.deinit(gpa);
+    reg.auto_switch.choice = true;
+
+    try appendAccountWithUsage(gpa, &reg, "first@example.com", .{
+        .primary = .{ .used_percent = 100.0, .window_minutes = 300, .resets_at = null },
+        .secondary = .{ .used_percent = 0.0, .window_minutes = 10080, .resets_at = 1776454100 },
+        .credits = null,
+        .plan_type = null,
+    }, 100);
+    try appendAccountWithUsage(gpa, &reg, "second@example.com", .{
+        .primary = .{ .used_percent = 100.0, .window_minutes = 300, .resets_at = null },
+        .secondary = .{ .used_percent = 30.0, .window_minutes = 10080, .resets_at = 1776454200 },
+        .credits = null,
+        .plan_type = null,
+    }, 200);
+
+    try std.testing.expect(auto.bestChoiceAccountIndex(&reg, std.time.timestamp()) == null);
+}
+
 test "Scenario: Given better candidate when auto switch runs then auth and active account move silently" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});

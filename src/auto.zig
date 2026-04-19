@@ -1286,6 +1286,7 @@ fn bestAccountIndex(reg: *registry.Registry, now: i64, skip_account_key: ?[]cons
         if (skip_account_key) |account_key| {
             if (std.mem.eql(u8, rec.account_key, account_key)) continue;
         }
+        if (!choiceCandidateAvailable(rec, now, reg.auto_switch.choice)) continue;
         const score = candidateScore(rec, now, reg.auto_switch.choice);
         if (best == null or candidateBetter(score, best.?, reg.auto_switch.choice)) {
             best = score;
@@ -1293,6 +1294,13 @@ fn bestAccountIndex(reg: *registry.Registry, now: i64, skip_account_key: ?[]cons
         }
     }
     return best_idx;
+}
+
+fn choiceCandidateAvailable(rec: *const registry.AccountRecord, now: i64, choice: bool) bool {
+    if (!choice) return true;
+    const rate_5h = registry.resolveRateWindow(rec.last_usage, 300, true);
+    const remaining_5h = registry.remainingPercentAt(rate_5h, now);
+    return remaining_5h == null or remaining_5h.? > 0;
 }
 
 pub fn shouldSwitchCurrent(reg: *registry.Registry, now: i64) bool {
