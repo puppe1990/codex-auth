@@ -275,6 +275,7 @@ fi
 
 mkdir -p "${INSTALL_DIR}"
 DEST_BIN="${INSTALL_DIR}/codex-auth"
+DEST_ALIAS="${INSTALL_DIR}/ca"
 
 if command -v install >/dev/null 2>&1; then
   install -m 0755 "${BIN_PATH}" "${DEST_BIN}"
@@ -283,8 +284,25 @@ else
   chmod 0755 "${DEST_BIN}"
 fi
 
+ALIAS_CREATED=0
+if [[ -L "${DEST_ALIAS}" ]]; then
+  existing_target="$(readlink "${DEST_ALIAS}" || true)"
+  if [[ "${existing_target}" == "codex-auth" ]]; then
+    ln -sfn "codex-auth" "${DEST_ALIAS}"
+    ALIAS_CREATED=1
+  fi
+elif [[ ! -e "${DEST_ALIAS}" ]]; then
+  ln -s "codex-auth" "${DEST_ALIAS}"
+  ALIAS_CREATED=1
+fi
+
 print_success "codex-auth installed successfully!"
 print_info "Path : ${DEST_BIN}"
+if [[ "${ALIAS_CREATED}" -eq 1 ]]; then
+  print_info "Alias: ${DEST_ALIAS}"
+else
+  print_warn "Skipped alias ${DEST_ALIAS} because that path is already in use."
+fi
 CURRENT_PATH_MISSING=0
 if path_contains_dir "${INSTALL_DIR}"; then
   :

@@ -4,6 +4,8 @@
 
 `codex-auth` is a command-line tool for switching Codex accounts.
 
+The package also installs `ca` as a short alias for `codex-auth`.
+
 > [!IMPORTANT]
 > For **Codex CLI** and **Codex App** users, switch accounts, then restart the client for the new account to take effect.
 >
@@ -24,6 +26,7 @@ npm install -g @openai/codex
 ```
 
 After that, you can use `codex login`, `codex login --device-auth`, `codex-auth login`, or `codex-auth login --device-auth` to sign in and add accounts more easily.
+You can also replace `codex-auth` with `ca` in the examples below.
 
 ## Install
 
