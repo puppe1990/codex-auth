@@ -45,11 +45,17 @@ pub const RolloutSignature = struct {
     event_timestamp_ms: i64,
 };
 
+pub const AutoSwitchStrategy = enum {
+    expiry_first,
+    balance_first,
+};
+
 pub const AutoSwitchConfig = struct {
     enabled: bool = false,
     threshold_5h_percent: u8 = default_auto_switch_threshold_5h_percent,
     threshold_weekly_percent: u8 = default_auto_switch_threshold_weekly_percent,
     choice: bool = false,
+    strategy: AutoSwitchStrategy = .expiry_first,
 };
 
 pub const ApiConfig = struct {
@@ -2574,6 +2580,20 @@ fn parseAutoSwitch(allocator: std.mem.Allocator, cfg: *AutoSwitchConfig, v: std.
             else => {},
         }
     }
+    if (obj.get("strategy")) |strategy| {
+        switch (strategy) {
+            .string => |value| {
+                if (parseAutoSwitchStrategy(value)) |parsed| cfg.strategy = parsed;
+            },
+            else => {},
+        }
+    }
+}
+
+pub fn parseAutoSwitchStrategy(value: []const u8) ?AutoSwitchStrategy {
+    if (std.mem.eql(u8, value, "expiry-first")) return .expiry_first;
+    if (std.mem.eql(u8, value, "balance-first")) return .balance_first;
+    return null;
 }
 
 fn parseApiConfig(cfg: *ApiConfig, v: std.json.Value) void {

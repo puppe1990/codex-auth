@@ -700,6 +700,7 @@ fn handleRefresh(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli
         return error.UsageApiDisabledForRefresh;
     }
 
+    try printChoiceResult("Refreshing accounts before choice...\n");
     var report = try refreshAllAccountUsage(allocator, codex_home, &reg);
     defer report.deinit(allocator);
     if (report.updated > 0) changed = true;
@@ -812,7 +813,30 @@ fn handleSwitch(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.
 fn handleChoice(allocator: std.mem.Allocator, codex_home: []const u8) !void {
     var reg = try registry.loadRegistry(allocator, codex_home);
     defer reg.deinit(allocator);
+    var changed = false;
     if (try registry.syncActiveAccountFromAuth(allocator, codex_home, &reg)) {
+        changed = true;
+    }
+
+    if (reg.accounts.items.len == 0) {
+        if (changed) {
+            try registry.saveRegistry(allocator, codex_home, &reg);
+        }
+        try printChoiceResult("No accounts available.\n");
+        return;
+    }
+
+    if (!reg.api.usage) {
+        try printRefreshUsageApiDisabled();
+        return error.UsageApiDisabledForRefresh;
+    }
+
+    var report = try refreshAllAccountUsage(allocator, codex_home, &reg);
+    defer report.deinit(allocator);
+    if (report.updated > 0) {
+        changed = true;
+    }
+    if (changed) {
         try registry.saveRegistry(allocator, codex_home, &reg);
     }
 

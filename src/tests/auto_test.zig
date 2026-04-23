@@ -738,7 +738,20 @@ test "Scenario: Given choice override when applying config then choice mode is u
     try std.testing.expect(cfg.choice);
 }
 
-test "Scenario: Given equal 5h candidates in choice mode when selecting auto candidate then weekly reset nearest the target wins" {
+test "Scenario: Given strategy override when applying config then strategy is updated" {
+    var cfg = registry.defaultAutoSwitchConfig();
+
+    auto.applyThresholdConfig(&cfg, .{
+        .threshold_5h_percent = null,
+        .threshold_weekly_percent = null,
+        .choice = null,
+        .strategy = .balance_first,
+    });
+
+    try std.testing.expect(cfg.strategy == .balance_first);
+}
+
+test "Scenario: Given equal-expiry 5h candidates in choice mode when selecting auto candidate then higher weekly remaining wins" {
     const gpa = std.testing.allocator;
     var reg = bdd.makeEmptyRegistry();
     defer reg.deinit(gpa);
@@ -751,14 +764,14 @@ test "Scenario: Given equal 5h candidates in choice mode when selecting auto can
         .plan_type = null,
     }, 100);
     try appendAccountWithUsage(gpa, &reg, "far@example.com", .{
-        .primary = .{ .used_percent = 10.0, .window_minutes = 300, .resets_at = null },
-        .secondary = .{ .used_percent = 20.0, .window_minutes = 10080, .resets_at = 1776200000 },
+        .primary = .{ .used_percent = 10.0, .window_minutes = 300, .resets_at = 1776300000 },
+        .secondary = .{ .used_percent = 5.0, .window_minutes = 10080, .resets_at = 1776200000 },
         .credits = null,
         .plan_type = null,
     }, 200);
     try appendAccountWithUsage(gpa, &reg, "near@example.com", .{
-        .primary = .{ .used_percent = 10.0, .window_minutes = 300, .resets_at = null },
-        .secondary = .{ .used_percent = 5.0, .window_minutes = 10080, .resets_at = 1776454100 },
+        .primary = .{ .used_percent = 10.0, .window_minutes = 300, .resets_at = 1776300000 },
+        .secondary = .{ .used_percent = 20.0, .window_minutes = 10080, .resets_at = 1776454100 },
         .credits = null,
         .plan_type = null,
     }, 300);
@@ -767,7 +780,109 @@ test "Scenario: Given equal 5h candidates in choice mode when selecting auto can
     try registry.setActiveAccountKey(gpa, &reg, active_account_key);
 
     const idx = auto.bestAutoSwitchCandidateIndex(&reg, std.time.timestamp()) orelse return error.TestExpectedEqual;
-    try std.testing.expect(std.mem.eql(u8, reg.accounts.items[idx].email, "near@example.com"));
+    try std.testing.expect(std.mem.eql(u8, reg.accounts.items[idx].email, "far@example.com"));
+}
+
+test "Scenario: Given equal 5h and weekly candidates in choice mode when selecting auto candidate then earlier weekly reset wins" {
+    const gpa = std.testing.allocator;
+    var reg = bdd.makeEmptyRegistry();
+    defer reg.deinit(gpa);
+    reg.auto_switch.choice = true;
+
+    try appendAccountWithUsage(gpa, &reg, "active@example.com", .{
+        .primary = .{ .used_percent = 95.0, .window_minutes = 300, .resets_at = null },
+        .secondary = .{ .used_percent = 90.0, .window_minutes = 10080, .resets_at = 1776400000 },
+        .credits = null,
+        .plan_type = null,
+    }, 100);
+    try appendAccountWithUsage(gpa, &reg, "later@example.com", .{
+        .primary = .{ .used_percent = 10.0, .window_minutes = 300, .resets_at = 1776300000 },
+        .secondary = .{ .used_percent = 20.0, .window_minutes = 10080, .resets_at = 1776454100 },
+        .credits = null,
+        .plan_type = null,
+    }, 200);
+    try appendAccountWithUsage(gpa, &reg, "earlier@example.com", .{
+        .primary = .{ .used_percent = 10.0, .window_minutes = 300, .resets_at = 1776300000 },
+        .secondary = .{ .used_percent = 20.0, .window_minutes = 10080, .resets_at = 1776200000 },
+        .credits = null,
+        .plan_type = null,
+    }, 300);
+    const active_account_key = try bdd.accountKeyForEmailAlloc(gpa, "active@example.com");
+    defer gpa.free(active_account_key);
+    try registry.setActiveAccountKey(gpa, &reg, active_account_key);
+
+    const idx = auto.bestAutoSwitchCandidateIndex(&reg, std.time.timestamp()) orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.eql(u8, reg.accounts.items[idx].email, "earlier@example.com"));
+}
+
+test "Scenario: Given choice candidates with different 5h reset times when selecting best choice then earlier 5h reset wins even with lower balance" {
+    const gpa = std.testing.allocator;
+    var reg = bdd.makeEmptyRegistry();
+    defer reg.deinit(gpa);
+    reg.auto_switch.choice = true;
+
+    try appendAccountWithUsage(gpa, &reg, "later-more@example.com", .{
+        .primary = .{ .used_percent = 10.0, .window_minutes = 300, .resets_at = 1776400000 },
+        .secondary = .{ .used_percent = 5.0, .window_minutes = 10080, .resets_at = 1777000000 },
+        .credits = null,
+        .plan_type = null,
+    }, 100);
+    try appendAccountWithUsage(gpa, &reg, "earlier-less@example.com", .{
+        .primary = .{ .used_percent = 35.0, .window_minutes = 300, .resets_at = 1776200000 },
+        .secondary = .{ .used_percent = 20.0, .window_minutes = 10080, .resets_at = 1777100000 },
+        .credits = null,
+        .plan_type = null,
+    }, 200);
+
+    const idx = auto.bestChoiceAccountIndex(&reg, std.time.timestamp()) orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.eql(u8, reg.accounts.items[idx].email, "earlier-less@example.com"));
+}
+
+test "Scenario: Given choice command ranking is requested while auto choice mode is off when selecting best choice then choice heuristics still apply" {
+    const gpa = std.testing.allocator;
+    var reg = bdd.makeEmptyRegistry();
+    defer reg.deinit(gpa);
+    reg.auto_switch.choice = false;
+
+    try appendAccountWithUsage(gpa, &reg, "depleted@example.com", .{
+        .primary = .{ .used_percent = 100.0, .window_minutes = 300, .resets_at = null },
+        .secondary = .{ .used_percent = 0.0, .window_minutes = 10080, .resets_at = 1776454100 },
+        .credits = null,
+        .plan_type = null,
+    }, 100);
+    try appendAccountWithUsage(gpa, &reg, "healthy@example.com", .{
+        .primary = .{ .used_percent = 25.0, .window_minutes = 300, .resets_at = 1776200000 },
+        .secondary = .{ .used_percent = 95.0, .window_minutes = 10080, .resets_at = 1776454200 },
+        .credits = null,
+        .plan_type = null,
+    }, 200);
+
+    const idx = auto.bestChoiceAccountIndex(&reg, std.time.timestamp()) orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.eql(u8, reg.accounts.items[idx].email, "healthy@example.com"));
+}
+
+test "Scenario: Given balance-first choice strategy when selecting best choice then higher 5h balance wins before earlier expiry" {
+    const gpa = std.testing.allocator;
+    var reg = bdd.makeEmptyRegistry();
+    defer reg.deinit(gpa);
+    reg.auto_switch.choice = true;
+    reg.auto_switch.strategy = .balance_first;
+
+    try appendAccountWithUsage(gpa, &reg, "later-more@example.com", .{
+        .primary = .{ .used_percent = 10.0, .window_minutes = 300, .resets_at = 1776400000 },
+        .secondary = .{ .used_percent = 5.0, .window_minutes = 10080, .resets_at = 1777000000 },
+        .credits = null,
+        .plan_type = null,
+    }, 100);
+    try appendAccountWithUsage(gpa, &reg, "earlier-less@example.com", .{
+        .primary = .{ .used_percent = 35.0, .window_minutes = 300, .resets_at = 1776200000 },
+        .secondary = .{ .used_percent = 20.0, .window_minutes = 10080, .resets_at = 1777100000 },
+        .credits = null,
+        .plan_type = null,
+    }, 200);
+
+    const idx = auto.bestChoiceAccountIndex(&reg, std.time.timestamp()) orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.eql(u8, reg.accounts.items[idx].email, "later-more@example.com"));
 }
 
 test "Scenario: Given zero-5h account in choice mode when selecting best choice then it is skipped" {
@@ -1680,6 +1795,7 @@ test "Scenario: Given status when rendering then auto and usage api settings are
         .threshold_5h_percent = 12,
         .threshold_weekly_percent = 8,
         .choice = false,
+        .strategy = .expiry_first,
         .api_usage_enabled = false,
         .api_account_enabled = false,
     });
@@ -1703,12 +1819,14 @@ test "Scenario: Given api usage mode when rendering status body then risk warnin
         .runtime = .running,
         .threshold_5h_percent = 12,
         .threshold_weekly_percent = 8,
-        .choice = false,
+        .choice = true,
+        .strategy = .balance_first,
         .api_usage_enabled = true,
         .api_account_enabled = true,
     });
 
     const output = aw.written();
+    try std.testing.expect(std.mem.indexOf(u8, output, "thresholds: 5h<12%, weekly<8%, choice:balance-first") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "usage: api") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "account: api") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "Warning: Usage refresh is currently using the ChatGPT usage API") == null);

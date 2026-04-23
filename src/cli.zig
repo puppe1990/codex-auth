@@ -56,6 +56,7 @@ pub const AutoThresholdOptions = struct {
     threshold_5h_percent: ?u8,
     threshold_weekly_percent: ?u8,
     choice: ?bool = null,
+    strategy: ?registry.AutoSwitchStrategy = null,
 };
 pub const AutoOptions = union(enum) {
     action: AutoAction,
@@ -348,6 +349,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Pars
             var threshold_5h_percent: ?u8 = null;
             var threshold_weekly_percent: ?u8 = null;
             var choice: ?bool = null;
+            var strategy: ?registry.AutoSwitchStrategy = null;
             var i: usize = 3;
             while (i < args.len) : (i += 1) {
                 const arg = std.mem.sliceTo(args[i], 0);
@@ -377,18 +379,27 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Pars
                     choice = false;
                     continue;
                 }
+                if (std.mem.eql(u8, arg, "--strategy")) {
+                    if (i + 1 >= args.len) return usageErrorResult(allocator, .config, "missing value for `--strategy`.", .{});
+                    if (strategy != null) return usageErrorResult(allocator, .config, "duplicate `--strategy` for `config auto`.", .{});
+                    strategy = registry.parseAutoSwitchStrategy(std.mem.sliceTo(args[i + 1], 0)) orelse
+                        return usageErrorResult(allocator, .config, "`--strategy` must be `expiry-first` or `balance-first`.", .{});
+                    i += 1;
+                    continue;
+                }
                 if (std.mem.eql(u8, arg, "enable") or std.mem.eql(u8, arg, "disable")) {
                     return usageErrorResult(allocator, .config, "`config auto` cannot mix actions with threshold flags.", .{});
                 }
                 return usageErrorResult(allocator, .config, "unknown argument `{s}` for `config auto`.", .{arg});
             }
-            if (threshold_5h_percent == null and threshold_weekly_percent == null and choice == null) {
+            if (threshold_5h_percent == null and threshold_weekly_percent == null and choice == null and strategy == null) {
                 return usageErrorResult(allocator, .config, "`config auto` requires an action or threshold flags.", .{});
             }
             return .{ .command = .{ .config = .{ .auto_switch = .{ .configure = .{
                 .threshold_5h_percent = threshold_5h_percent,
                 .threshold_weekly_percent = threshold_weekly_percent,
                 .choice = choice,
+                .strategy = strategy,
             } } } } };
         }
 
@@ -791,6 +802,7 @@ fn writeUsageSection(out: *std.Io.Writer, topic: HelpTopic) !void {
             try out.writeAll("  codex-auth config auto --weekly <percent>\n");
             try out.writeAll("  codex-auth config auto --choice\n");
             try out.writeAll("  codex-auth config auto --no-choice\n");
+            try out.writeAll("  codex-auth config auto --strategy <expiry-first|balance-first>\n");
             try out.writeAll("  codex-auth config api enable\n");
             try out.writeAll("  codex-auth config api disable\n");
         },
@@ -836,6 +848,7 @@ fn writeExamplesSection(out: *std.Io.Writer, topic: HelpTopic) !void {
         .config => {
             try out.writeAll("  codex-auth config auto --5h 12 --weekly 8\n");
             try out.writeAll("  codex-auth config auto --choice\n");
+            try out.writeAll("  codex-auth config auto --choice --strategy expiry-first\n");
             try out.writeAll("  codex-auth config api enable\n");
         },
         .daemon => {

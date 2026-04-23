@@ -508,6 +508,30 @@ test "Scenario: Given config auto no-choice when parsing then standard mode is p
     }
 }
 
+test "Scenario: Given config auto strategy when parsing then ranking strategy is preserved" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "config", "auto", "--strategy", "balance-first" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    switch (result) {
+        .command => |cmd| switch (cmd) {
+            .config => |opts| switch (opts) {
+                .auto_switch => |auto_opts| switch (auto_opts) {
+                    .configure => |cfg| {
+                        try std.testing.expect(cfg.strategy != null);
+                        try std.testing.expect(cfg.strategy.? == .balance_first);
+                    },
+                    else => return error.TestExpectedEqual,
+                },
+                else => return error.TestExpectedEqual,
+            },
+            else => return error.TestExpectedEqual,
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
 test "Scenario: Given config auto enable when parsing then auto action is preserved" {
     const gpa = std.testing.allocator;
     const args = [_][:0]const u8{ "codex-auth", "config", "auto", "enable" };

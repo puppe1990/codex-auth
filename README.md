@@ -115,7 +115,7 @@ Remove-Item "$env:LOCALAPPDATA\codex-auth\bin\codex-auth-auto.exe" -Force -Error
 | Command | Description |
 |---------|-------------|
 | `codex-auth config auto enable\|disable` | Enable or disable background auto-switching |
-| `codex-auth config auto [--5h <%>] [--weekly <%>] [--choice\|--no-choice]` | Set auto-switch thresholds and candidate ranking mode |
+| `codex-auth config auto [--5h <%>] [--weekly <%>] [--choice\|--no-choice] [--strategy <expiry-first\|balance-first>]` | Set auto-switch thresholds and candidate ranking mode |
 | `codex-auth config api enable\|disable` | Enable or disable both usage refresh and team name refresh API calls |
 
 ---
@@ -163,6 +163,14 @@ codex-auth switch work             # match by alias set during import
 ```
 
 If the keyword matches multiple accounts, the command falls back to interactive selection. Press `q` to quit without switching.
+
+### Choice
+
+```shell
+codex-auth choice
+```
+
+Before ranking candidates, `codex-auth choice` refreshes all stored accounts through the usage API and waits for that refresh to finish. The decision is made only after the bulk refresh completes.
 
 ### Remove Accounts
 
@@ -255,25 +263,35 @@ codex-auth config auto --5h 12 --weekly 8
 codex-auth config auto --weekly 8
 ```
 
-Enable the background candidate ranking mode that prefers the account with the highest 5h remaining usage, then breaks 5h ties by the weekly reset closest to `2026-04-17 16:28:00 -03:00`, then by the highest weekly remaining usage:
+Enable the background candidate ranking mode and choose a strategy:
 
 ```shell
 codex-auth config auto --choice
 codex-auth config auto --no-choice
+codex-auth config auto --strategy expiry-first
+codex-auth config auto --strategy balance-first
 ```
 
-`codex-auth status` shows `thresholds: ... , choice` when this ranking mode is active.
+`codex-auth status` shows `thresholds: ... , choice:<strategy>` when this ranking mode is active.
 
 When auto-switching is enabled, a long-running background watcher refreshes the active account's usage and silently switches accounts when:
 
 - 5h remaining drops below the configured 5h threshold (default `10%`), or
 - weekly remaining drops below the configured weekly threshold (default `5%`)
 
-When `--choice` is enabled, candidate selection runs silently in the background with this priority:
+When `--choice` is enabled with `--strategy expiry-first`, candidate selection runs silently in the background with this priority:
+
+- earliest 5h reset
+- highest 5h remaining usage
+- highest weekly remaining usage
+- earliest weekly reset
+
+When `--choice` is enabled with `--strategy balance-first`, candidate selection runs silently in the background with this priority:
 
 - highest 5h remaining usage
-- weekly reset closest to `2026-04-17 16:28:00 -03:00`
+- earliest 5h reset
 - highest weekly remaining usage
+- earliest weekly reset
 
 The managed background worker is long-running on all supported platforms:
 
