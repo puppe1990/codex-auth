@@ -928,7 +928,7 @@ fn handleChoice(allocator: std.mem.Allocator, codex_home: []const u8) !void {
 
     if (reg.active_account_key) |active_account_key| {
         if (std.mem.eql(u8, active_account_key, best_account_key)) {
-            const message = try std.fmt.allocPrint(allocator, "Best account already active.\n{s}\n", .{choice_reason});
+            const message = try formatChoiceAlreadyActiveMessageAlloc(allocator, best_email, choice_reason);
             defer allocator.free(message);
             try printChoiceResult(message);
             return;
@@ -952,6 +952,18 @@ fn printChoiceResult(message: []const u8) !void {
     const out = stdout.out();
     try out.writeAll(message);
     try out.flush();
+}
+
+pub fn formatChoiceAlreadyActiveMessageAlloc(
+    allocator: std.mem.Allocator,
+    best_email: []const u8,
+    choice_reason: []const u8,
+) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "Best account already active: {s}.\n{s}\n",
+        .{ best_email, choice_reason },
+    );
 }
 
 pub fn formatChoiceReasonAlloc(

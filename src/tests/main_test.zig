@@ -435,6 +435,22 @@ test "formatChoiceReasonAlloc uses ranking defaults when winner usage windows ar
     );
 }
 
+test "formatChoiceAlreadyActiveMessageAlloc includes the active best account email" {
+    const gpa = std.testing.allocator;
+
+    const out = try main_mod.formatChoiceAlreadyActiveMessageAlloc(
+        gpa,
+        "best@example.com",
+        "Reason: expiry-first; won as the only available account; 5h reset today at 15:40; 5h remaining 40%; weekly remaining 23%.",
+    );
+    defer gpa.free(out);
+
+    try std.testing.expectEqualStrings(
+        "Best account already active: best@example.com.\nReason: expiry-first; won as the only available account; 5h reset today at 15:40; 5h remaining 40%; weekly remaining 23%.\n",
+        out,
+    );
+}
+
 fn mockAccountNameFetcherRequiringFreshToken(
     allocator: std.mem.Allocator,
     access_token: []const u8,
