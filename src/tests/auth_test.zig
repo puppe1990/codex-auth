@@ -28,7 +28,7 @@ test "parse auth info from jwt" {
 
     const json = try std.fmt.allocPrint(
         gpa,
-        "{{\"tokens\":{{\"access_token\":\"access-user@example.com\",\"account_id\":\"{s}\",\"id_token\":\"{s}\"}}}}",
+        "{{\"tokens\":{{\"access_token\":\"access-user@example.com\",\"refresh_token\":\"refresh-user@example.com\",\"account_id\":\"{s}\",\"id_token\":\"{s}\"}}}}",
         .{ chatgpt_account_id, jwt },
     );
     defer gpa.free(json);
@@ -55,6 +55,8 @@ test "parse auth info from jwt" {
     try std.testing.expect(std.mem.eql(u8, info.record_key.?, expected_record_key));
     try std.testing.expect(info.access_token != null);
     try std.testing.expect(std.mem.eql(u8, info.access_token.?, "access-user@example.com"));
+    try std.testing.expect(info.refresh_token != null);
+    try std.testing.expect(std.mem.eql(u8, info.refresh_token.?, "refresh-user@example.com"));
 }
 
 test "api key auth" {
@@ -89,6 +91,7 @@ test "parse auth info does not leak duplicated tokens when id token is missing" 
     try std.testing.expect(info.email == null);
     try std.testing.expect(info.chatgpt_account_id == null);
     try std.testing.expect(info.access_token == null);
+    try std.testing.expect(info.refresh_token == null);
     try std.testing.expect(info.auth_mode == .chatgpt);
 }
 

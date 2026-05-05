@@ -38,6 +38,16 @@ pub const Candidate = struct {
     }
 };
 
+pub const StoredAuthSelection = struct {
+    auth_path: []u8,
+    info: auth.AuthInfo,
+
+    pub fn deinit(self: *StoredAuthSelection, allocator: std.mem.Allocator) void {
+        allocator.free(self.auth_path);
+        self.info.deinit(allocator);
+    }
+};
+
 fn hasCandidate(candidates: []const Candidate, chatgpt_user_id: []const u8) bool {
     for (candidates) |candidate| {
         if (std.mem.eql(u8, candidate.chatgpt_user_id, chatgpt_user_id)) return true;
@@ -165,6 +175,66 @@ pub fn loadStoredAuthInfoForUser(
     return best_info;
 }
 
+pub fn loadStoredAuthSelectionForUser(
+    allocator: std.mem.Allocator,
+    codex_home: []const u8,
+    reg: *registry.Registry,
+    chatgpt_user_id: []const u8,
+) !?StoredAuthSelection {
+    var best_info: ?auth.AuthInfo = null;
+    var best_path: ?[]u8 = null;
+    errdefer {
+        if (best_info) |*info| info.deinit(allocator);
+        if (best_path) |path| allocator.free(path);
+    }
+
+    for (reg.accounts.items) |rec| {
+        if (!std.mem.eql(u8, rec.chatgpt_user_id, chatgpt_user_id)) continue;
+        if (rec.auth_mode != null and rec.auth_mode.? != .chatgpt) continue;
+
+        const auth_path = try registry.accountAuthPath(allocator, codex_home, rec.account_key);
+        errdefer allocator.free(auth_path);
+
+        const info = auth.parseAuthInfo(allocator, auth_path) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            error.FileNotFound => {
+                allocator.free(auth_path);
+                continue;
+            },
+            else => {
+                allocator.free(auth_path);
+                std.log.warn("account metadata refresh skipped: {s}", .{@errorName(err)});
+                continue;
+            },
+        };
+
+        if (!storedAuthInfoSupportsAccountNameRefresh(&info)) {
+            var skipped = info;
+            skipped.deinit(allocator);
+            allocator.free(auth_path);
+            continue;
+        }
+
+        if (best_info == null or candidateIsNewer(&info, &best_info.?)) {
+            if (best_info) |*previous| previous.deinit(allocator);
+            if (best_path) |path| allocator.free(path);
+            best_info = info;
+            best_path = auth_path;
+            continue;
+        }
+
+        var rejected = info;
+        rejected.deinit(allocator);
+        allocator.free(auth_path);
+    }
+
+    if (best_info == null or best_path == null) return null;
+    return .{
+        .auth_path = best_path.?,
+        .info = best_info.?,
+    };
+}
+
 fn makeStoredAuthInfoForTest(
     allocator: std.mem.Allocator,
     access_token: []const u8,
@@ -177,6 +247,7 @@ fn makeStoredAuthInfoForTest(
         .chatgpt_user_id = try allocator.dupe(u8, "user-1"),
         .record_key = null,
         .access_token = try allocator.dupe(u8, access_token),
+        .refresh_token = null,
         .last_refresh = try allocator.dupe(u8, last_refresh),
         .plan = null,
         .auth_mode = .chatgpt,

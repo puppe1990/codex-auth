@@ -438,6 +438,31 @@ pub fn refreshAccountNamesForList(
     return try refreshAccountNamesForActiveAuth(allocator, codex_home, reg, fetcher);
 }
 
+fn refreshAccountNamesForActiveAuthStoredPath(
+    allocator: std.mem.Allocator,
+    codex_home: []const u8,
+    reg: *registry.Registry,
+) !bool {
+    const active_user_id = registry.activeChatgptUserId(reg) orelse return false;
+    if (!shouldRefreshTeamAccountNamesForUserScope(reg, active_user_id)) return false;
+
+    const auth_path = try registry.activeAuthPath(allocator, codex_home);
+    defer allocator.free(auth_path);
+
+    const result = account_api.fetchAccountsForAuthPathDetailed(
+        allocator,
+        account_api.default_account_endpoint,
+        auth_path,
+    ) catch |err| {
+        std.log.warn("account metadata refresh skipped: {s}", .{@errorName(err)});
+        return false;
+    };
+    defer result.deinit(allocator);
+
+    const entries = result.entries orelse return false;
+    return try registry.applyAccountNamesForUser(allocator, reg, active_user_id, entries);
+}
+
 fn shouldRefreshTeamAccountNamesForUserScope(reg: *registry.Registry, chatgpt_user_id: []const u8) bool {
     if (!reg.api.account) return false;
     return registry.shouldFetchTeamAccountNamesForUser(reg, chatgpt_user_id);
@@ -481,6 +506,51 @@ pub fn runBackgroundAccountNameRefresh(
         fetcher,
         account_name_refresh.BackgroundRefreshLock.acquire,
     );
+}
+
+fn runBackgroundAccountNameRefreshUsingStoredAuth(
+    allocator: std.mem.Allocator,
+    codex_home: []const u8,
+    lock_acquirer: BackgroundRefreshLockAcquirer,
+) !void {
+    var refresh_lock = (try lock_acquirer(allocator, codex_home)) orelse return;
+    defer refresh_lock.release();
+
+    var reg = try registry.loadRegistry(allocator, codex_home);
+    defer reg.deinit(allocator);
+    var candidates = try account_name_refresh.collectCandidates(allocator, &reg);
+    defer {
+        for (candidates.items) |*candidate| candidate.deinit(allocator);
+        candidates.deinit(allocator);
+    }
+
+    for (candidates.items) |candidate| {
+        var latest = try registry.loadRegistry(allocator, codex_home);
+        defer latest.deinit(allocator);
+
+        if (!shouldRefreshTeamAccountNamesForUserScope(&latest, candidate.chatgpt_user_id)) continue;
+
+        var selection = (try account_name_refresh.loadStoredAuthSelectionForUser(
+            allocator,
+            codex_home,
+            &latest,
+            candidate.chatgpt_user_id,
+        )) orelse continue;
+        defer selection.deinit(allocator);
+
+        const result = account_api.fetchAccountsForAuthPathDetailed(
+            allocator,
+            account_api.default_account_endpoint,
+            selection.auth_path,
+        ) catch |err| {
+            std.log.warn("account metadata refresh skipped: {s}", .{@errorName(err)});
+            continue;
+        };
+        defer result.deinit(allocator);
+
+        const entries = result.entries orelse continue;
+        _ = try applyAccountNameRefreshEntriesToLatestRegistry(allocator, codex_home, candidate.chatgpt_user_id, entries);
+    }
 }
 
 fn runBackgroundAccountNameRefreshWithLockAcquirer(
@@ -625,7 +695,11 @@ fn loadSingleFileImportAuthInfo(
 }
 
 fn handleList(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.ListOptions) !void {
-    if (isAccountNameRefreshOnlyMode()) return try runBackgroundAccountNameRefresh(allocator, codex_home, defaultAccountFetcher);
+    if (isAccountNameRefreshOnlyMode()) return try runBackgroundAccountNameRefreshUsingStoredAuth(
+        allocator,
+        codex_home,
+        account_name_refresh.BackgroundRefreshLock.acquire,
+    );
 
     var reg = try registry.loadRegistry(allocator, codex_home);
     defer reg.deinit(allocator);

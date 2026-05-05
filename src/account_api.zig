@@ -1,4 +1,5 @@
 const std = @import("std");
+const auth = @import("auth.zig");
 const chatgpt_http = @import("chatgpt_http.zig");
 
 pub const default_account_endpoint = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27";
@@ -44,6 +45,20 @@ pub fn fetchAccountsForTokenDetailed(
         .entries = try parseAccountsResponse(allocator, http_result.body),
         .status_code = http_result.status_code,
     };
+}
+
+pub fn fetchAccountsForAuthPathDetailed(
+    allocator: std.mem.Allocator,
+    endpoint: []const u8,
+    auth_path: []const u8,
+) !FetchResult {
+    const first_result = try fetchAccountsForAuthPathOnce(allocator, endpoint, auth_path);
+    if (first_result.status_code != 401) return first_result;
+
+    if (!(try auth.refreshAuthAtPath(allocator, auth_path))) return first_result;
+
+    first_result.deinit(allocator);
+    return try fetchAccountsForAuthPathOnce(allocator, endpoint, auth_path);
 }
 
 pub fn parseAccountsResponse(allocator: std.mem.Allocator, body: []const u8) !?[]AccountEntry {
@@ -110,4 +125,21 @@ fn parseAccountNameAlloc(allocator: std.mem.Allocator, value: ?std.json.Value) !
     };
     if (raw.len == 0) return null;
     return try allocator.dupe(u8, raw);
+}
+
+fn fetchAccountsForAuthPathOnce(
+    allocator: std.mem.Allocator,
+    endpoint: []const u8,
+    auth_path: []const u8,
+) !FetchResult {
+    const info = try auth.parseAuthInfo(allocator, auth_path);
+    defer info.deinit(allocator);
+
+    if (info.auth_mode != .chatgpt) {
+        return .{ .entries = null, .status_code = null };
+    }
+
+    const access_token = info.access_token orelse return .{ .entries = null, .status_code = null };
+    const chatgpt_account_id = info.chatgpt_account_id orelse return .{ .entries = null, .status_code = null };
+    return try fetchAccountsForTokenDetailed(allocator, endpoint, access_token, chatgpt_account_id);
 }
