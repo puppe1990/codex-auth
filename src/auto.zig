@@ -652,12 +652,12 @@ fn formatAutoSwitchReason(
         const winner_weekly = registry.resolveRateWindow(to.last_usage, 10080, false);
         const loser_weekly = registry.resolveRateWindow(from.last_usage, 10080, false);
 
-        const winner_5h_remaining = registry.remainingPercentAt(winner_5h, now);
-        const loser_5h_remaining = registry.remainingPercentAt(loser_5h, now);
+        const winner_5h_remaining = normalizedChoiceRemaining(winner_5h, now);
+        const loser_5h_remaining = normalizedChoiceRemaining(loser_5h, now);
         const winner_5h_reset = windowResetsAt(winner_5h);
         const loser_5h_reset = windowResetsAt(loser_5h);
-        const winner_weekly_remaining = registry.remainingPercentAt(winner_weekly, now);
-        const loser_weekly_remaining = registry.remainingPercentAt(loser_weekly, now);
+        const winner_weekly_remaining = normalizedChoiceRemaining(winner_weekly, now);
+        const loser_weekly_remaining = normalizedChoiceRemaining(loser_weekly, now);
         const winner_weekly_reset = windowResetsAt(winner_weekly);
         const loser_weekly_reset = windowResetsAt(loser_weekly);
 
@@ -691,8 +691,8 @@ fn formatAutoSwitchReason(
         return "won on newer account record after full tie";
     }
 
-    const winner_score = registry.usageScoreAt(to.last_usage, now);
-    const loser_score = registry.usageScoreAt(from.last_usage, now);
+    const winner_score = normalizedUsageScore(to.last_usage, now);
+    const loser_score = normalizedUsageScore(from.last_usage, now);
     if (winner_score != loser_score) {
         return switchPercentReason(reason_buf, "higher usage score", winner_score, loser_score);
     }
@@ -702,7 +702,7 @@ fn formatAutoSwitchReason(
     return "won on newer account record after score tie";
 }
 
-fn switchPercentReason(buf: *[128]u8, label: []const u8, winner: ?i64, loser: ?i64) []const u8 {
+fn switchPercentReason(buf: *[128]u8, label: []const u8, winner: i64, loser: i64) []const u8 {
     var winner_buf: [5]u8 = undefined;
     var loser_buf: [5]u8 = undefined;
     return std.fmt.bufPrint(buf, "{s} ({s} vs {s})", .{
@@ -710,6 +710,14 @@ fn switchPercentReason(buf: *[128]u8, label: []const u8, winner: ?i64, loser: ?i
         percentLabel(&winner_buf, winner),
         percentLabel(&loser_buf, loser),
     }) catch label;
+}
+
+fn normalizedChoiceRemaining(window: ?registry.RateLimitWindow, now: i64) i64 {
+    return registry.remainingPercentAt(window, now) orelse 100;
+}
+
+fn normalizedUsageScore(usage: ?registry.RateLimitSnapshot, now: i64) i64 {
+    return registry.usageScoreAt(usage, now) orelse 100;
 }
 
 fn switchResetReason(

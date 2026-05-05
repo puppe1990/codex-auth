@@ -921,21 +921,24 @@ test "Scenario: Given balance-first choice strategy when selecting best choice t
     defer reg.deinit(gpa);
     reg.auto_switch.choice = true;
     reg.auto_switch.strategy = .balance_first;
+    const now = try localTimestamp(2026, 5, 5, 9, 0, 0);
+    const later_reset = try localTimestamp(2026, 5, 6, 2, 0, 0);
+    const earlier_reset = try localTimestamp(2026, 5, 5, 18, 0, 0);
 
     try appendAccountWithUsage(gpa, &reg, "later-more@example.com", .{
-        .primary = .{ .used_percent = 10.0, .window_minutes = 300, .resets_at = 1776400000 },
-        .secondary = .{ .used_percent = 5.0, .window_minutes = 10080, .resets_at = 1777000000 },
+        .primary = .{ .used_percent = 10.0, .window_minutes = 300, .resets_at = later_reset },
+        .secondary = .{ .used_percent = 5.0, .window_minutes = 10080, .resets_at = later_reset },
         .credits = null,
         .plan_type = null,
     }, 100);
     try appendAccountWithUsage(gpa, &reg, "earlier-less@example.com", .{
-        .primary = .{ .used_percent = 35.0, .window_minutes = 300, .resets_at = 1776200000 },
-        .secondary = .{ .used_percent = 20.0, .window_minutes = 10080, .resets_at = 1777100000 },
+        .primary = .{ .used_percent = 35.0, .window_minutes = 300, .resets_at = earlier_reset },
+        .secondary = .{ .used_percent = 20.0, .window_minutes = 10080, .resets_at = earlier_reset },
         .credits = null,
         .plan_type = null,
     }, 200);
 
-    const idx = auto.bestChoiceAccountIndex(&reg, std.time.timestamp()) orelse return error.TestExpectedEqual;
+    const idx = auto.bestChoiceAccountIndex(&reg, now) orelse return error.TestExpectedEqual;
     try std.testing.expect(std.mem.eql(u8, reg.accounts.items[idx].email, "later-more@example.com"));
 }
 
@@ -1851,6 +1854,32 @@ test "Scenario: Given standard-mode automatic switch when writing daemon log the
         u8,
         output,
         "[switch] from@example.com -> to@example.com | higher usage score (50% vs 1%)\n",
+    ));
+}
+
+test "Scenario: Given standard-mode automatic switch with missing winner usage when writing daemon log then it uses ranking defaults" {
+    const gpa = std.testing.allocator;
+    var reg = bdd.makeEmptyRegistry();
+    defer reg.deinit(gpa);
+    const now = try localTimestamp(2026, 5, 5, 9, 0, 0);
+    try appendAccountWithUsage(gpa, &reg, "from@example.com", .{
+        .primary = .{ .used_percent = 99.0, .window_minutes = 300, .resets_at = null },
+        .secondary = .{ .used_percent = 80.0, .window_minutes = 10080, .resets_at = null },
+        .credits = null,
+        .plan_type = .pro,
+    }, 100);
+    try appendAccountWithUsage(gpa, &reg, "to@example.com", null, null);
+
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+
+    try auto.writeAutoSwitchLogLine(&aw.writer, &reg.accounts.items[0], &reg.accounts.items[1], false, .expiry_first, now);
+
+    const output = aw.written();
+    try std.testing.expect(std.mem.eql(
+        u8,
+        output,
+        "[switch] from@example.com -> to@example.com | higher usage score (100% vs 1%)\n",
     ));
 }
 

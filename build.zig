@@ -49,6 +49,7 @@ pub fn build(b: *std.Build) void {
         .name = "codex-auth-test",
         .root_module = test_module,
     });
+    const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&tests.step);
+    test_step.dependOn(&run_tests.step);
 }

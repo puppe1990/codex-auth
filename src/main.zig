@@ -890,8 +890,8 @@ pub fn formatChoiceReasonAlloc(
     const winner_explanation = auto.explainChoiceWinner(reg, account_idx, now);
     const rate_5h = registry.resolveRateWindow(rec.last_usage, 300, true);
     const weekly = registry.resolveRateWindow(rec.last_usage, 10080, false);
-    const remaining_5h = registry.remainingPercentAt(rate_5h, now);
-    const weekly_remaining = registry.remainingPercentAt(weekly, now);
+    const remaining_5h = normalizedChoiceRemaining(rate_5h, now);
+    const weekly_remaining = normalizedChoiceRemaining(weekly, now);
     const winner_reason = try choiceWinnerReasonTextAlloc(allocator, reg, account_idx, winner_explanation, now);
     defer allocator.free(winner_reason);
     const reset_label = try formatChoiceResetLabelAlloc(allocator, rate_5h, now);
@@ -921,9 +921,12 @@ fn choiceStrategyLabel(strategy: registry.AutoSwitchStrategy) []const u8 {
     };
 }
 
-fn percentTextAlloc(allocator: std.mem.Allocator, value: ?i64) ![]u8 {
-    if (value == null) return allocator.dupe(u8, "-");
-    return std.fmt.allocPrint(allocator, "{d}%", .{value.?});
+fn percentTextAlloc(allocator: std.mem.Allocator, value: i64) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{d}%", .{value});
+}
+
+fn normalizedChoiceRemaining(window: ?registry.RateLimitWindow, now: i64) i64 {
+    return registry.remainingPercentAt(window, now) orelse 100;
 }
 
 fn choiceWinnerReasonTextAlloc(
@@ -961,12 +964,12 @@ fn choiceWinnerReasonTextAlloc(
             .higher_5h_remaining => blk: {
                 const winner_5h = try percentTextAlloc(
                     allocator,
-                    registry.remainingPercentAt(registry.resolveRateWindow(winner.last_usage, 300, true), now),
+                    normalizedChoiceRemaining(registry.resolveRateWindow(winner.last_usage, 300, true), now),
                 );
                 defer allocator.free(winner_5h);
                 const runner_up_5h = try percentTextAlloc(
                     allocator,
-                    registry.remainingPercentAt(registry.resolveRateWindow(runner_up.last_usage, 300, true), now),
+                    normalizedChoiceRemaining(registry.resolveRateWindow(runner_up.last_usage, 300, true), now),
                 );
                 defer allocator.free(runner_up_5h);
                 break :blk std.fmt.allocPrint(
@@ -978,12 +981,12 @@ fn choiceWinnerReasonTextAlloc(
             .higher_weekly_remaining => blk: {
                 const winner_weekly = try percentTextAlloc(
                     allocator,
-                    registry.remainingPercentAt(registry.resolveRateWindow(winner.last_usage, 10080, false), now),
+                    normalizedChoiceRemaining(registry.resolveRateWindow(winner.last_usage, 10080, false), now),
                 );
                 defer allocator.free(winner_weekly);
                 const runner_up_weekly = try percentTextAlloc(
                     allocator,
-                    registry.remainingPercentAt(registry.resolveRateWindow(runner_up.last_usage, 10080, false), now),
+                    normalizedChoiceRemaining(registry.resolveRateWindow(runner_up.last_usage, 10080, false), now),
                 );
                 defer allocator.free(runner_up_weekly);
                 break :blk std.fmt.allocPrint(

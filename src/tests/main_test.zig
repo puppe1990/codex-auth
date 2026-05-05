@@ -403,6 +403,38 @@ test "formatChoiceReasonAlloc explains balance-first winner by higher weekly rem
     );
 }
 
+test "formatChoiceReasonAlloc uses ranking defaults when winner usage windows are missing" {
+    const gpa = std.testing.allocator;
+    var reg = makeRegistry();
+    defer reg.deinit(gpa);
+    reg.auto_switch.strategy = .balance_first;
+
+    const now = try localTimestamp(2026, 5, 5, 9, 0, 0);
+    try appendAccount(gpa, &reg, primary_record_key, "winner@example.com", "", .plus);
+    try appendAccountWithUsage(
+        gpa,
+        &reg,
+        secondary_record_key,
+        "runner-up@example.com",
+        "",
+        .plus,
+        .{
+            .primary = .{ .used_percent = 90.0, .window_minutes = 300, .resets_at = null },
+            .secondary = .{ .used_percent = 90.0, .window_minutes = 10080, .resets_at = null },
+            .credits = null,
+            .plan_type = .plus,
+        },
+    );
+
+    const out = try main_mod.formatChoiceReasonAlloc(gpa, &reg, 0, now);
+    defer gpa.free(out);
+
+    try std.testing.expectEqualStrings(
+        "Reason: balance-first; won on higher 5h remaining against runner-up@example.com (100% vs 10%); 5h reset unknown; 5h remaining 100%; weekly remaining 100%.",
+        out,
+    );
+}
+
 fn mockAccountNameFetcherRequiringFreshToken(
     allocator: std.mem.Allocator,
     access_token: []const u8,
@@ -1096,6 +1128,10 @@ test "Scenario: Given stored account snapshots when refreshing all usage then ev
         "user-alpha",
         "acct-alpha",
     );
+    const active_auth_path = try registry.activeAuthPath(gpa, codex_home);
+    defer gpa.free(active_auth_path);
+    const active_auth_before = try bdd.readFileAlloc(gpa, active_auth_path);
+    defer gpa.free(active_auth_before);
 
     refresh_alpha_auth_path = try registry.accountAuthPath(gpa, codex_home, alpha_key);
     defer {
@@ -1124,11 +1160,9 @@ test "Scenario: Given stored account snapshots when refreshing all usage then ev
     try std.testing.expect(reg.active_account_key != null);
     try std.testing.expect(std.mem.eql(u8, reg.active_account_key.?, alpha_key));
 
-    const active_auth_path = try registry.activeAuthPath(gpa, codex_home);
-    defer gpa.free(active_auth_path);
     const active_auth = try bdd.readFileAlloc(gpa, active_auth_path);
     defer gpa.free(active_auth);
-    try std.testing.expect(std.mem.indexOf(u8, active_auth, "\"email\":\"alpha@example.com\"") != null);
+    try std.testing.expectEqualStrings(active_auth_before, active_auth);
 }
 
 test "Scenario: Given mixed refresh results when refreshing all usage then the report keeps per-account outcomes" {
