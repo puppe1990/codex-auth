@@ -1494,7 +1494,7 @@ pub fn explainChoiceWinner(reg: *const registry.Registry, winner_idx: usize, now
 
     for (reg.accounts.items, 0..) |*rec, idx| {
         if (idx == winner_idx) continue;
-        if (!choiceCandidateAvailable(rec, now, true)) continue;
+        if (!choiceCandidateAvailable(reg, rec, now, true)) continue;
         const score = candidateScore(rec, now, true);
         if (runner_up_score == null or candidateBetter(score, runner_up_score.?, true, reg.auto_switch.strategy)) {
             runner_up_idx = idx;
@@ -1526,7 +1526,7 @@ fn bestAccountIndex(
         if (skip_account_key) |account_key| {
             if (std.mem.eql(u8, rec.account_key, account_key)) continue;
         }
-        if (!choiceCandidateAvailable(rec, now, choice)) continue;
+        if (!choiceCandidateAvailable(reg, rec, now, choice)) continue;
         const score = candidateScore(rec, now, choice);
         if (best == null or candidateBetter(score, best.?, choice, strategy)) {
             best = score;
@@ -1536,17 +1536,18 @@ fn bestAccountIndex(
     return best_idx;
 }
 
-fn choiceCandidateAvailable(rec: *const registry.AccountRecord, now: i64, choice: bool) bool {
+fn choiceCandidateAvailable(reg: *const registry.Registry, rec: *const registry.AccountRecord, now: i64, choice: bool) bool {
     if (!choice) return true;
-    const rate_5h = registry.resolveRateWindow(rec.last_usage, 300, true);
-    const remaining_5h = registry.remainingPercentAt(rate_5h, now);
-    return remaining_5h == null or remaining_5h.? > 0;
+    return !accountBelowSwitchThreshold(reg, rec, now);
 }
 
 pub fn shouldSwitchCurrent(reg: *registry.Registry, now: i64) bool {
     const account_key = reg.active_account_key orelse return false;
     const idx = registry.findAccountIndexByAccountKey(reg, account_key) orelse return false;
-    const rec = &reg.accounts.items[idx];
+    return accountBelowSwitchThreshold(reg, &reg.accounts.items[idx], now);
+}
+
+fn accountBelowSwitchThreshold(reg: *const registry.Registry, rec: *const registry.AccountRecord, now: i64) bool {
     const resolved_5h = resolve5hTriggerWindow(rec.last_usage);
     const threshold_5h_percent = effective5hThresholdPercent(reg, rec, resolved_5h.allow_free_guard);
     const rem_5h = registry.remainingPercentAt(resolved_5h.window, now);
@@ -1555,7 +1556,7 @@ pub fn shouldSwitchCurrent(reg: *registry.Registry, now: i64) bool {
         (rem_week != null and rem_week.? < @as(i64, reg.auto_switch.threshold_weekly_percent));
 }
 
-fn effective5hThresholdPercent(reg: *registry.Registry, rec: *const registry.AccountRecord, allow_free_guard: bool) i64 {
+fn effective5hThresholdPercent(reg: *const registry.Registry, rec: *const registry.AccountRecord, allow_free_guard: bool) i64 {
     var threshold = @as(i64, reg.auto_switch.threshold_5h_percent);
     if (allow_free_guard and registry.resolvePlan(rec) == .free) {
         threshold = @max(threshold, free_plan_realtime_guard_5h_percent);

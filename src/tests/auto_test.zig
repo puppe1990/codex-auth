@@ -965,6 +965,31 @@ test "Scenario: Given zero-5h account in choice mode when selecting best choice 
     try std.testing.expect(std.mem.eql(u8, reg.accounts.items[idx].email, "available@example.com"));
 }
 
+test "Scenario: Given choice candidates with weekly remaining below threshold when selecting best choice then unhealthy weekly candidates are skipped" {
+    const gpa = std.testing.allocator;
+    var reg = bdd.makeEmptyRegistry();
+    defer reg.deinit(gpa);
+    reg.auto_switch.choice = true;
+    reg.auto_switch.threshold_weekly_percent = 5;
+    const now = std.time.timestamp();
+
+    try appendAccountWithUsage(gpa, &reg, "weekly-empty@example.com", .{
+        .primary = .{ .used_percent = 34.0, .window_minutes = 300, .resets_at = now + 600 },
+        .secondary = .{ .used_percent = 100.0, .window_minutes = 10080, .resets_at = now + 300 },
+        .credits = null,
+        .plan_type = null,
+    }, 100);
+    try appendAccountWithUsage(gpa, &reg, "healthy@example.com", .{
+        .primary = .{ .used_percent = 89.0, .window_minutes = 300, .resets_at = now + 1200 },
+        .secondary = .{ .used_percent = 68.0, .window_minutes = 10080, .resets_at = now + 900 },
+        .credits = null,
+        .plan_type = null,
+    }, 200);
+
+    const idx = auto.bestChoiceAccountIndex(&reg, now) orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.eql(u8, reg.accounts.items[idx].email, "healthy@example.com"));
+}
+
 test "Scenario: Given all accounts with zero 5h in choice mode when selecting best choice then no account is available" {
     const gpa = std.testing.allocator;
     var reg = bdd.makeEmptyRegistry();

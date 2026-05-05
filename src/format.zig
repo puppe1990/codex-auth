@@ -31,7 +31,7 @@ fn printAccountsTable(reg: *registry.Registry) !void {
     var stdout: io_util.Stdout = undefined;
     stdout.init();
     const out = stdout.out();
-    const headers = [_][]const u8{ "ACCOUNT", "PLAN", "5H USAGE", "WEEKLY USAGE", "LAST ACTIVITY" };
+    const headers = [_][]const u8{ "ACCOUNT", "PLAN", "5H LEFT", "WEEKLY LEFT", "LAST ACTIVITY" };
     var widths = [_]usize{
         headers[0].len,
         headers[1].len,
@@ -71,18 +71,16 @@ fn printAccountsTable(reg: *registry.Registry) !void {
     adjustListWidths(&widths, prefix_len, sep_len);
 
     const use_color = colorEnabled();
-    const h0 = try truncateAlloc(headers[0], widths[0]);
+    const rendered_headers = listHeadersForWidths(widths);
+    const h0 = try truncateAlloc(rendered_headers.h0, widths[0]);
     defer std.heap.page_allocator.free(h0);
-    const h1 = try truncateAlloc(headers[1], widths[1]);
+    const h1 = try truncateAlloc(rendered_headers.h1, widths[1]);
     defer std.heap.page_allocator.free(h1);
-    const header_5h = if (widths[2] >= "5H USAGE".len) "5H USAGE" else "5H";
-    const h2 = try truncateAlloc(header_5h, widths[2]);
+    const h2 = try truncateAlloc(rendered_headers.h2, widths[2]);
     defer std.heap.page_allocator.free(h2);
-    const header_week = if (widths[3] >= "WEEKLY USAGE".len) "WEEKLY USAGE" else if (widths[3] >= "WEEKLY".len) "WEEKLY" else if (widths[3] >= "WEEK".len) "WEEK" else "W";
-    const h3 = try truncateAlloc(header_week, widths[3]);
+    const h3 = try truncateAlloc(rendered_headers.h3, widths[3]);
     defer std.heap.page_allocator.free(h3);
-    const header_last = if (widths[4] >= "LAST ACTIVITY".len) "LAST ACTIVITY" else "LAST";
-    const h4 = try truncateAlloc(header_last, widths[4]);
+    const h4 = try truncateAlloc(rendered_headers.h4, widths[4]);
     defer std.heap.page_allocator.free(h4);
 
     if (use_color) try out.writeAll(ansi.dim);
@@ -410,6 +408,24 @@ fn writePadded(out: *std.Io.Writer, value: []const u8, width: usize) !void {
     }
 }
 
+const ListHeaders = struct {
+    h0: []const u8,
+    h1: []const u8,
+    h2: []const u8,
+    h3: []const u8,
+    h4: []const u8,
+};
+
+fn listHeadersForWidths(widths: [5]usize) ListHeaders {
+    return .{
+        .h0 = "ACCOUNT",
+        .h1 = "PLAN",
+        .h2 = if (widths[2] >= "5H LEFT".len) "5H LEFT" else "5H",
+        .h3 = if (widths[3] >= "WEEKLY LEFT".len) "WEEKLY LEFT" else if (widths[3] >= "WEEKLY".len) "WEEKLY" else if (widths[3] >= "WEEK".len) "WEEK" else "W",
+        .h4 = if (widths[4] >= "LAST ACTIVITY".len) "LAST ACTIVITY" else "LAST",
+    };
+}
+
 fn writeRepeat(out: *std.Io.Writer, ch: u8, count: usize) !void {
     var i: usize = 0;
     while (i < count) : (i += 1) {
@@ -600,4 +616,10 @@ test "formatRateLimitFullAlloc shows 100% after reset instead of dash-prefixed v
     defer std.heap.page_allocator.free(formatted);
 
     try std.testing.expectEqualStrings("100%", formatted);
+}
+
+test "list headers describe remaining quota instead of usage" {
+    const headers = listHeadersForWidths(.{ "ACCOUNT".len, "PLAN".len, "5H LEFT".len, "WEEKLY LEFT".len, "LAST ACTIVITY".len });
+    try std.testing.expectEqualStrings("5H LEFT", headers.h2);
+    try std.testing.expectEqualStrings("WEEKLY LEFT", headers.h3);
 }
