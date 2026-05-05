@@ -88,9 +88,9 @@ test "fetch usage for auth path groups non-chatgpt or incomplete auth as missing
     try tmp.dir.writeFile(.{
         .sub_path = "auth.json",
         .data =
-            \\{
-            \\  "OPENAI_API_KEY": "sk-test"
-            \\}
+        \\{
+        \\  "OPENAI_API_KEY": "sk-test"
+        \\}
         ,
     });
 

@@ -26,7 +26,8 @@ test "parse auth info from jwt" {
     const jwt = try std.mem.concat(gpa, u8, &[_][]const u8{ h64, ".", p64, ".sig" });
     defer gpa.free(jwt);
 
-    const json = try std.fmt.allocPrint(gpa,
+    const json = try std.fmt.allocPrint(
+        gpa,
         "{{\"tokens\":{{\"access_token\":\"access-user@example.com\",\"account_id\":\"{s}\",\"id_token\":\"{s}\"}}}}",
         .{ chatgpt_account_id, jwt },
     );
@@ -106,7 +107,8 @@ test "parse auth info frees allocations on account mismatch" {
     const jwt = try std.mem.concat(gpa, u8, &[_][]const u8{ h64, ".", p64, ".sig" });
     defer gpa.free(jwt);
 
-    const json = try std.fmt.allocPrint(gpa,
+    const json = try std.fmt.allocPrint(
+        gpa,
         "{{\"tokens\":{{\"access_token\":\"access-user@example.com\",\"account_id\":\"{s}\",\"id_token\":\"{s}\"}}}}",
         .{ token_account_id, jwt },
     );
