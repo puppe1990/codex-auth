@@ -361,7 +361,7 @@ pub fn refreshAuthAtPath(allocator: std.mem.Allocator, auth_path: []const u8) !b
     const status_code = http_result.status_code orelse return false;
     if (status_code < 200 or status_code >= 300) return false;
 
-    var refresh_response = std.json.parseFromSlice(RefreshTokenResponse, allocator, http_result.body, .{}) catch return false;
+    var refresh_response = parseRefreshTokenResponse(allocator, http_result.body) catch return false;
     defer refresh_response.deinit();
 
     const refreshed_auth_json = try buildRefreshedAuthJson(
@@ -425,6 +425,12 @@ fn buildRefreshedAuthJson(
     return try out.toOwnedSlice();
 }
 
+fn parseRefreshTokenResponse(allocator: std.mem.Allocator, body: []const u8) !std.json.Parsed(RefreshTokenResponse) {
+    return std.json.parseFromSlice(RefreshTokenResponse, allocator, body, .{
+        .ignore_unknown_fields = true,
+    });
+}
+
 fn preferNonEmpty(primary: ?[]const u8, fallback: ?[]const u8) ?[]const u8 {
     if (primary) |value| {
         if (value.len > 0) return value;
@@ -455,6 +461,26 @@ fn formatUtcIso8601Alloc(allocator: std.mem.Allocator, ts: i64) ![]u8 {
         minute,
         second,
     });
+}
+
+test "refresh token response parsing ignores extra fields" {
+    const gpa = std.testing.allocator;
+    const body =
+        \\{
+        \\  "access_token": "new-access",
+        \\  "refresh_token": "new-refresh",
+        \\  "id_token": "new-id",
+        \\  "token_type": "Bearer",
+        \\  "expires_in": 3600
+        \\}
+    ;
+
+    var parsed = try parseRefreshTokenResponse(gpa, body);
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("new-access", parsed.value.access_token.?);
+    try std.testing.expectEqualStrings("new-refresh", parsed.value.refresh_token.?);
+    try std.testing.expectEqualStrings("new-id", parsed.value.id_token.?);
 }
 
 fn gmtimeCompat(ts: i64, out_tm: *c_time.struct_tm) bool {
