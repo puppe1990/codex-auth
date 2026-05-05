@@ -1,9 +1,13 @@
 const std = @import("std");
 const account_api = @import("../account_api.zig");
 const auto = @import("../auto.zig");
+const builtin = @import("builtin");
 const registry = @import("../registry.zig");
 const usage_api = @import("../usage_api.zig");
 const bdd = @import("bdd_helpers.zig");
+const c_time = @cImport({
+    @cInclude("time.h");
+});
 
 const rollout_line = "{" ++
     "\"timestamp\":\"2025-01-01T00:00:00Z\"," ++
@@ -390,6 +394,28 @@ fn appendAccountWithUsage(
     const idx = reg.accounts.items.len - 1;
     reg.accounts.items[idx].last_usage = usage;
     reg.accounts.items[idx].last_usage_at = last_usage_at;
+}
+
+fn localTimestamp(year: i32, month: i32, day: i32, hour: i32, minute: i32, second: i32) !i64 {
+    var tm: c_time.struct_tm = std.mem.zeroes(c_time.struct_tm);
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = hour;
+    tm.tm_min = minute;
+    tm.tm_sec = second;
+    tm.tm_isdst = -1;
+
+    if (comptime builtin.os.tag == .windows) {
+        if (!@hasDecl(c_time, "_mktime64")) return error.UnsupportedPlatform;
+        const result = c_time._mktime64(&tm);
+        if (result == -1) return error.InvalidLocalTimestamp;
+        return std.math.cast(i64, result) orelse error.InvalidLocalTimestamp;
+    }
+
+    const result = c_time.mktime(&tm);
+    if (result == -1) return error.InvalidLocalTimestamp;
+    return std.math.cast(i64, result) orelse error.InvalidLocalTimestamp;
 }
 
 fn apiSnapshot() registry.RateLimitSnapshot {
@@ -838,6 +864,34 @@ test "Scenario: Given choice candidates with different 5h reset times when selec
     try std.testing.expect(std.mem.eql(u8, reg.accounts.items[idx].email, "earlier-less@example.com"));
 }
 
+test "Scenario: Given expiry-first choice candidates where one resets today and another tomorrow when selecting best choice then today's reset wins before tomorrow's higher balance" {
+    const gpa = std.testing.allocator;
+    var reg = bdd.makeEmptyRegistry();
+    defer reg.deinit(gpa);
+    reg.auto_switch.choice = true;
+    reg.auto_switch.strategy = .expiry_first;
+
+    const now = try localTimestamp(2026, 5, 5, 9, 0, 0);
+    const today_reset = try localTimestamp(2026, 5, 5, 23, 30, 0);
+    const tomorrow_reset = try localTimestamp(2026, 5, 6, 0, 30, 0);
+
+    try appendAccountWithUsage(gpa, &reg, "tomorrow-more@example.com", .{
+        .primary = .{ .used_percent = 0.0, .window_minutes = 300, .resets_at = tomorrow_reset },
+        .secondary = .{ .used_percent = 10.0, .window_minutes = 10080, .resets_at = tomorrow_reset },
+        .credits = null,
+        .plan_type = null,
+    }, 100);
+    try appendAccountWithUsage(gpa, &reg, "today-less@example.com", .{
+        .primary = .{ .used_percent = 40.0, .window_minutes = 300, .resets_at = today_reset },
+        .secondary = .{ .used_percent = 20.0, .window_minutes = 10080, .resets_at = today_reset },
+        .credits = null,
+        .plan_type = null,
+    }, 200);
+
+    const idx = auto.bestChoiceAccountIndex(&reg, now) orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.eql(u8, reg.accounts.items[idx].email, "today-less@example.com"));
+}
+
 test "Scenario: Given choice command ranking is requested while auto choice mode is off when selecting best choice then choice heuristics still apply" {
     const gpa = std.testing.allocator;
     var reg = bdd.makeEmptyRegistry();
@@ -867,21 +921,24 @@ test "Scenario: Given balance-first choice strategy when selecting best choice t
     defer reg.deinit(gpa);
     reg.auto_switch.choice = true;
     reg.auto_switch.strategy = .balance_first;
+    const now = try localTimestamp(2026, 5, 5, 9, 0, 0);
+    const later_reset = try localTimestamp(2026, 5, 6, 2, 0, 0);
+    const earlier_reset = try localTimestamp(2026, 5, 5, 18, 0, 0);
 
     try appendAccountWithUsage(gpa, &reg, "later-more@example.com", .{
-        .primary = .{ .used_percent = 10.0, .window_minutes = 300, .resets_at = 1776400000 },
-        .secondary = .{ .used_percent = 5.0, .window_minutes = 10080, .resets_at = 1777000000 },
+        .primary = .{ .used_percent = 10.0, .window_minutes = 300, .resets_at = later_reset },
+        .secondary = .{ .used_percent = 5.0, .window_minutes = 10080, .resets_at = later_reset },
         .credits = null,
         .plan_type = null,
     }, 100);
     try appendAccountWithUsage(gpa, &reg, "earlier-less@example.com", .{
-        .primary = .{ .used_percent = 35.0, .window_minutes = 300, .resets_at = 1776200000 },
-        .secondary = .{ .used_percent = 20.0, .window_minutes = 10080, .resets_at = 1777100000 },
+        .primary = .{ .used_percent = 35.0, .window_minutes = 300, .resets_at = earlier_reset },
+        .secondary = .{ .used_percent = 20.0, .window_minutes = 10080, .resets_at = earlier_reset },
         .credits = null,
         .plan_type = null,
     }, 200);
 
-    const idx = auto.bestChoiceAccountIndex(&reg, std.time.timestamp()) orelse return error.TestExpectedEqual;
+    const idx = auto.bestChoiceAccountIndex(&reg, now) orelse return error.TestExpectedEqual;
     try std.testing.expect(std.mem.eql(u8, reg.accounts.items[idx].email, "later-more@example.com"));
 }
 
@@ -1736,20 +1793,94 @@ test "Scenario: Given supported and unsupported OS tags when checking service su
     try std.testing.expect(!auto.supportsManagedServiceOnPlatform(.freebsd));
 }
 
-test "Scenario: Given automatic switch when writing daemon log then it records source and destination emails" {
+test "Scenario: Given choice-mode automatic switch when writing daemon log then it records the comparative reason" {
     const gpa = std.testing.allocator;
     var reg = bdd.makeEmptyRegistry();
     defer reg.deinit(gpa);
-    try bdd.appendAccount(gpa, &reg, "from@example.com", "work", null);
-    try bdd.appendAccount(gpa, &reg, "to@example.com", "personal", null);
+    const now = try localTimestamp(2026, 5, 5, 9, 0, 0);
+    const from_reset = try localTimestamp(2026, 5, 5, 16, 15, 0);
+    const to_reset = try localTimestamp(2026, 5, 5, 14, 45, 0);
+    try appendAccountWithUsage(gpa, &reg, "from@example.com", .{
+        .primary = .{ .used_percent = 0.0, .window_minutes = 300, .resets_at = from_reset },
+        .secondary = .{ .used_percent = 10.0, .window_minutes = 10080, .resets_at = from_reset },
+        .credits = null,
+        .plan_type = .pro,
+    }, 100);
+    try appendAccountWithUsage(gpa, &reg, "to@example.com", .{
+        .primary = .{ .used_percent = 0.0, .window_minutes = 300, .resets_at = to_reset },
+        .secondary = .{ .used_percent = 58.0, .window_minutes = 10080, .resets_at = to_reset },
+        .credits = null,
+        .plan_type = .pro,
+    }, 200);
 
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
 
-    try auto.writeAutoSwitchLogLine(&aw.writer, &reg.accounts.items[0], &reg.accounts.items[1]);
+    try auto.writeAutoSwitchLogLine(&aw.writer, &reg.accounts.items[0], &reg.accounts.items[1], true, .expiry_first, now);
 
     const output = aw.written();
-    try std.testing.expect(std.mem.eql(u8, output, "[switch] from@example.com -> to@example.com\n"));
+    try std.testing.expect(std.mem.eql(
+        u8,
+        output,
+        "[switch] from@example.com -> to@example.com | earlier 5h reset (today at 14:45 vs today at 16:15)\n",
+    ));
+}
+
+test "Scenario: Given standard-mode automatic switch when writing daemon log then it records the usage-score comparison" {
+    const gpa = std.testing.allocator;
+    var reg = bdd.makeEmptyRegistry();
+    defer reg.deinit(gpa);
+    const now = try localTimestamp(2026, 5, 5, 9, 0, 0);
+    try appendAccountWithUsage(gpa, &reg, "from@example.com", .{
+        .primary = .{ .used_percent = 99.0, .window_minutes = 300, .resets_at = null },
+        .secondary = .{ .used_percent = 80.0, .window_minutes = 10080, .resets_at = null },
+        .credits = null,
+        .plan_type = .pro,
+    }, 100);
+    try appendAccountWithUsage(gpa, &reg, "to@example.com", .{
+        .primary = .{ .used_percent = 20.0, .window_minutes = 300, .resets_at = null },
+        .secondary = .{ .used_percent = 50.0, .window_minutes = 10080, .resets_at = null },
+        .credits = null,
+        .plan_type = .pro,
+    }, 200);
+
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+
+    try auto.writeAutoSwitchLogLine(&aw.writer, &reg.accounts.items[0], &reg.accounts.items[1], false, .expiry_first, now);
+
+    const output = aw.written();
+    try std.testing.expect(std.mem.eql(
+        u8,
+        output,
+        "[switch] from@example.com -> to@example.com | higher usage score (50% vs 1%)\n",
+    ));
+}
+
+test "Scenario: Given standard-mode automatic switch with missing winner usage when writing daemon log then it uses ranking defaults" {
+    const gpa = std.testing.allocator;
+    var reg = bdd.makeEmptyRegistry();
+    defer reg.deinit(gpa);
+    const now = try localTimestamp(2026, 5, 5, 9, 0, 0);
+    try appendAccountWithUsage(gpa, &reg, "from@example.com", .{
+        .primary = .{ .used_percent = 99.0, .window_minutes = 300, .resets_at = null },
+        .secondary = .{ .used_percent = 80.0, .window_minutes = 10080, .resets_at = null },
+        .credits = null,
+        .plan_type = .pro,
+    }, 100);
+    try appendAccountWithUsage(gpa, &reg, "to@example.com", null, null);
+
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+
+    try auto.writeAutoSwitchLogLine(&aw.writer, &reg.accounts.items[0], &reg.accounts.items[1], false, .expiry_first, now);
+
+    const output = aw.written();
+    try std.testing.expect(std.mem.eql(
+        u8,
+        output,
+        "[switch] from@example.com -> to@example.com | higher usage score (100% vs 1%)\n",
+    ));
 }
 
 test "Scenario: Given an absolute managed unit path when deleting it then the file is removed" {

@@ -6,6 +6,21 @@
 
 The package also installs `ca` as a short alias for `codex-auth`.
 
+## Development
+
+Install the repository-managed git hook:
+
+```shell
+./scripts/install-git-hooks.sh
+```
+
+The pre-commit hook auto-formats staged Zig files with `zig fmt`, re-stages them, then runs:
+
+```shell
+zig build test
+zig build run -- list
+```
+
 > [!IMPORTANT]
 > For **Codex CLI** and **Codex App** users, switch accounts, then restart the client for the new account to take effect.
 >

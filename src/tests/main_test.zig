@@ -1,6 +1,10 @@
 const std = @import("std");
 const account_api = @import("../account_api.zig");
 const auth_mod = @import("../auth.zig");
+const builtin = @import("builtin");
+const c_time = @cImport({
+    @cInclude("time.h");
+});
 const display_rows = @import("../display_rows.zig");
 const main_mod = @import("../main.zig");
 const registry = @import("../registry.zig");
@@ -69,6 +73,43 @@ fn appendAccount(
         .last_usage_at = null,
         .last_local_rollout = null,
     });
+}
+
+fn appendAccountWithUsage(
+    allocator: std.mem.Allocator,
+    reg: *registry.Registry,
+    record_key: []const u8,
+    email: []const u8,
+    alias: []const u8,
+    plan: registry.PlanType,
+    usage: registry.RateLimitSnapshot,
+) !void {
+    try appendAccount(allocator, reg, record_key, email, alias, plan);
+    const idx = reg.accounts.items.len - 1;
+    reg.accounts.items[idx].last_usage = usage;
+    reg.accounts.items[idx].last_usage_at = 1;
+}
+
+fn localTimestamp(year: i32, month: i32, day: i32, hour: i32, minute: i32, second: i32) !i64 {
+    var tm: c_time.struct_tm = std.mem.zeroes(c_time.struct_tm);
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = hour;
+    tm.tm_min = minute;
+    tm.tm_sec = second;
+    tm.tm_isdst = -1;
+
+    if (comptime builtin.os.tag == .windows) {
+        if (!@hasDecl(c_time, "_mktime64")) return error.UnsupportedPlatform;
+        const result = c_time._mktime64(&tm);
+        if (result == -1) return error.InvalidLocalTimestamp;
+        return std.math.cast(i64, result) orelse error.InvalidLocalTimestamp;
+    }
+
+    const result = c_time.mktime(&tm);
+    if (result == -1) return error.InvalidLocalTimestamp;
+    return std.math.cast(i64, result) orelse error.InvalidLocalTimestamp;
 }
 
 fn writeSnapshot(allocator: std.mem.Allocator, codex_home: []const u8, email: []const u8, plan: []const u8) !void {
@@ -267,6 +308,131 @@ fn mockAccountNameFetcherWithRegistryMutation(
     }
 
     return try mockAccountNameFetcher(allocator, access_token, account_id);
+}
+
+test "formatChoiceReasonAlloc explains expiry-first winner by earlier 5h reset against the runner-up" {
+    const gpa = std.testing.allocator;
+    var reg = makeRegistry();
+    defer reg.deinit(gpa);
+    reg.auto_switch.strategy = .expiry_first;
+
+    const now = try localTimestamp(2026, 5, 5, 9, 0, 0);
+    const winner_reset = try localTimestamp(2026, 5, 5, 14, 45, 0);
+    const runner_up_reset = try localTimestamp(2026, 5, 5, 16, 15, 0);
+    try appendAccountWithUsage(
+        gpa,
+        &reg,
+        primary_record_key,
+        "winner@example.com",
+        "",
+        .plus,
+        .{
+            .primary = .{ .used_percent = 0.0, .window_minutes = 300, .resets_at = winner_reset },
+            .secondary = .{ .used_percent = 58.0, .window_minutes = 10080, .resets_at = winner_reset },
+            .credits = null,
+            .plan_type = .plus,
+        },
+    );
+    try appendAccountWithUsage(
+        gpa,
+        &reg,
+        secondary_record_key,
+        "runner-up@example.com",
+        "",
+        .plus,
+        .{
+            .primary = .{ .used_percent = 0.0, .window_minutes = 300, .resets_at = runner_up_reset },
+            .secondary = .{ .used_percent = 10.0, .window_minutes = 10080, .resets_at = runner_up_reset },
+            .credits = null,
+            .plan_type = .plus,
+        },
+    );
+
+    const out = try main_mod.formatChoiceReasonAlloc(gpa, &reg, 0, now);
+    defer gpa.free(out);
+
+    try std.testing.expectEqualStrings(
+        "Reason: expiry-first; won on earlier 5h reset against runner-up@example.com (today at 14:45 vs today at 16:15); 5h reset today at 14:45; 5h remaining 100%; weekly remaining 42%.",
+        out,
+    );
+}
+
+test "formatChoiceReasonAlloc explains balance-first winner by higher weekly remaining after 5h tie" {
+    const gpa = std.testing.allocator;
+    var reg = makeRegistry();
+    defer reg.deinit(gpa);
+    reg.auto_switch.strategy = .expiry_first;
+
+    const now = try localTimestamp(2026, 5, 5, 9, 0, 0);
+    const reset = try localTimestamp(2026, 5, 6, 0, 30, 0);
+    try appendAccountWithUsage(
+        gpa,
+        &reg,
+        primary_record_key,
+        "winner@example.com",
+        "",
+        .plus,
+        .{
+            .primary = .{ .used_percent = 12.0, .window_minutes = 300, .resets_at = reset },
+            .secondary = .{ .used_percent = 68.0, .window_minutes = 10080, .resets_at = reset },
+            .credits = null,
+            .plan_type = .plus,
+        },
+    );
+    try appendAccountWithUsage(
+        gpa,
+        &reg,
+        secondary_record_key,
+        "runner-up@example.com",
+        "",
+        .plus,
+        .{
+            .primary = .{ .used_percent = 12.0, .window_minutes = 300, .resets_at = reset },
+            .secondary = .{ .used_percent = 90.0, .window_minutes = 10080, .resets_at = reset },
+            .credits = null,
+            .plan_type = .plus,
+        },
+    );
+
+    const out = try main_mod.formatChoiceReasonAlloc(gpa, &reg, 0, now);
+    defer gpa.free(out);
+
+    try std.testing.expectEqualStrings(
+        "Reason: expiry-first; won on higher weekly remaining after 5h tie against runner-up@example.com (32% vs 10%); 5h reset 00:30 on 6 May; 5h remaining 88%; weekly remaining 32%.",
+        out,
+    );
+}
+
+test "formatChoiceReasonAlloc uses ranking defaults when winner usage windows are missing" {
+    const gpa = std.testing.allocator;
+    var reg = makeRegistry();
+    defer reg.deinit(gpa);
+    reg.auto_switch.strategy = .balance_first;
+
+    const now = try localTimestamp(2026, 5, 5, 9, 0, 0);
+    try appendAccount(gpa, &reg, primary_record_key, "winner@example.com", "", .plus);
+    try appendAccountWithUsage(
+        gpa,
+        &reg,
+        secondary_record_key,
+        "runner-up@example.com",
+        "",
+        .plus,
+        .{
+            .primary = .{ .used_percent = 90.0, .window_minutes = 300, .resets_at = null },
+            .secondary = .{ .used_percent = 90.0, .window_minutes = 10080, .resets_at = null },
+            .credits = null,
+            .plan_type = .plus,
+        },
+    );
+
+    const out = try main_mod.formatChoiceReasonAlloc(gpa, &reg, 0, now);
+    defer gpa.free(out);
+
+    try std.testing.expectEqualStrings(
+        "Reason: balance-first; won on higher 5h remaining against runner-up@example.com (100% vs 10%); 5h reset unknown; 5h remaining 100%; weekly remaining 100%.",
+        out,
+    );
 }
 
 fn mockAccountNameFetcherRequiringFreshToken(
@@ -962,6 +1128,10 @@ test "Scenario: Given stored account snapshots when refreshing all usage then ev
         "user-alpha",
         "acct-alpha",
     );
+    const active_auth_path = try registry.activeAuthPath(gpa, codex_home);
+    defer gpa.free(active_auth_path);
+    const active_auth_before = try bdd.readFileAlloc(gpa, active_auth_path);
+    defer gpa.free(active_auth_before);
 
     refresh_alpha_auth_path = try registry.accountAuthPath(gpa, codex_home, alpha_key);
     defer {
@@ -990,11 +1160,9 @@ test "Scenario: Given stored account snapshots when refreshing all usage then ev
     try std.testing.expect(reg.active_account_key != null);
     try std.testing.expect(std.mem.eql(u8, reg.active_account_key.?, alpha_key));
 
-    const active_auth_path = try registry.activeAuthPath(gpa, codex_home);
-    defer gpa.free(active_auth_path);
     const active_auth = try bdd.readFileAlloc(gpa, active_auth_path);
     defer gpa.free(active_auth);
-    try std.testing.expect(std.mem.indexOf(u8, active_auth, "\"email\":\"alpha@example.com\"") != null);
+    try std.testing.expectEqualStrings(active_auth_before, active_auth);
 }
 
 test "Scenario: Given mixed refresh results when refreshing all usage then the report keeps per-account outcomes" {

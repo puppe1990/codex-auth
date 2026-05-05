@@ -57,6 +57,21 @@ const CandidateScore = struct {
     created_at: i64,
 };
 
+pub const ChoiceWinnerReason = enum {
+    only_available,
+    earlier_5h_reset,
+    higher_5h_remaining,
+    higher_weekly_remaining,
+    earlier_weekly_reset,
+    newer_usage_snapshot,
+    newer_account_record,
+};
+
+pub const ChoiceWinnerExplanation = struct {
+    runner_up_idx: ?usize,
+    reason: ChoiceWinnerReason,
+};
+
 const candidate_upkeep_refresh_limit: usize = 1;
 const candidate_switch_validation_limit: usize = 3;
 
@@ -598,15 +613,152 @@ pub fn writeAutoSwitchLogLine(
     out: *std.Io.Writer,
     from: *const registry.AccountRecord,
     to: *const registry.AccountRecord,
+    choice: bool,
+    strategy: registry.AutoSwitchStrategy,
+    now: i64,
 ) !void {
-    try out.print("[switch] {s} -> {s}\n", .{ from.email, to.email });
+    var reason_buf: [128]u8 = undefined;
+    if (formatAutoSwitchReason(&reason_buf, from, to, choice, strategy, now)) |reason| {
+        try out.print("[switch] {s} -> {s} | {s}\n", .{ from.email, to.email, reason });
+    } else {
+        try out.print("[switch] {s} -> {s}\n", .{ from.email, to.email });
+    }
     try out.flush();
 }
 
-fn emitAutoSwitchLog(from: *const registry.AccountRecord, to: *const registry.AccountRecord) void {
-    var stderr_buffer: [256]u8 = undefined;
+fn emitAutoSwitchLog(
+    from: *const registry.AccountRecord,
+    to: *const registry.AccountRecord,
+    choice: bool,
+    strategy: registry.AutoSwitchStrategy,
+    now: i64,
+) void {
+    var stderr_buffer: [512]u8 = undefined;
     var writer = std.fs.File.stderr().writer(&stderr_buffer);
-    writeAutoSwitchLogLine(&writer.interface, from, to) catch {};
+    writeAutoSwitchLogLine(&writer.interface, from, to, choice, strategy, now) catch {};
+}
+
+fn formatAutoSwitchReason(
+    reason_buf: *[128]u8,
+    from: *const registry.AccountRecord,
+    to: *const registry.AccountRecord,
+    choice: bool,
+    strategy: registry.AutoSwitchStrategy,
+    now: i64,
+) ?[]const u8 {
+    if (choice) {
+        const winner_5h = registry.resolveRateWindow(to.last_usage, 300, true);
+        const loser_5h = registry.resolveRateWindow(from.last_usage, 300, true);
+        const winner_weekly = registry.resolveRateWindow(to.last_usage, 10080, false);
+        const loser_weekly = registry.resolveRateWindow(from.last_usage, 10080, false);
+
+        const winner_5h_remaining = normalizedChoiceRemaining(winner_5h, now);
+        const loser_5h_remaining = normalizedChoiceRemaining(loser_5h, now);
+        const winner_5h_reset = windowResetsAt(winner_5h);
+        const loser_5h_reset = windowResetsAt(loser_5h);
+        const winner_weekly_remaining = normalizedChoiceRemaining(winner_weekly, now);
+        const loser_weekly_remaining = normalizedChoiceRemaining(loser_weekly, now);
+        const winner_weekly_reset = windowResetsAt(winner_weekly);
+        const loser_weekly_reset = windowResetsAt(loser_weekly);
+
+        switch (strategy) {
+            .expiry_first => {
+                if (winner_5h_reset != loser_5h_reset) {
+                    return switchResetReason(reason_buf, "earlier 5h reset", winner_5h, loser_5h, now);
+                }
+                if (winner_5h_remaining != loser_5h_remaining) {
+                    return switchPercentReason(reason_buf, "higher 5h remaining", winner_5h_remaining, loser_5h_remaining);
+                }
+            },
+            .balance_first => {
+                if (winner_5h_remaining != loser_5h_remaining) {
+                    return switchPercentReason(reason_buf, "higher 5h remaining", winner_5h_remaining, loser_5h_remaining);
+                }
+                if (winner_5h_reset != loser_5h_reset) {
+                    return switchResetReason(reason_buf, "earlier 5h reset", winner_5h, loser_5h, now);
+                }
+            },
+        }
+        if (winner_weekly_remaining != loser_weekly_remaining) {
+            return switchPercentReason(reason_buf, "higher weekly remaining after 5h tie", winner_weekly_remaining, loser_weekly_remaining);
+        }
+        if (winner_weekly_reset != loser_weekly_reset) {
+            return switchResetReason(reason_buf, "earlier weekly reset after usage tie", winner_weekly, loser_weekly, now);
+        }
+        if ((to.last_usage_at orelse -1) != (from.last_usage_at orelse -1)) {
+            return "won on newer usage snapshot after quota tie";
+        }
+        return "won on newer account record after full tie";
+    }
+
+    const winner_score = normalizedUsageScore(to.last_usage, now);
+    const loser_score = normalizedUsageScore(from.last_usage, now);
+    if (winner_score != loser_score) {
+        return switchPercentReason(reason_buf, "higher usage score", winner_score, loser_score);
+    }
+    if ((to.last_usage_at orelse -1) != (from.last_usage_at orelse -1)) {
+        return "won on newer usage snapshot after score tie";
+    }
+    return "won on newer account record after score tie";
+}
+
+fn switchPercentReason(buf: *[128]u8, label: []const u8, winner: i64, loser: i64) []const u8 {
+    var winner_buf: [5]u8 = undefined;
+    var loser_buf: [5]u8 = undefined;
+    return std.fmt.bufPrint(buf, "{s} ({s} vs {s})", .{
+        label,
+        percentLabel(&winner_buf, winner),
+        percentLabel(&loser_buf, loser),
+    }) catch label;
+}
+
+fn normalizedChoiceRemaining(window: ?registry.RateLimitWindow, now: i64) i64 {
+    return registry.remainingPercentAt(window, now) orelse 100;
+}
+
+fn normalizedUsageScore(usage: ?registry.RateLimitSnapshot, now: i64) i64 {
+    return registry.usageScoreAt(usage, now) orelse 100;
+}
+
+fn switchResetReason(
+    buf: *[128]u8,
+    label: []const u8,
+    winner: ?registry.RateLimitWindow,
+    loser: ?registry.RateLimitWindow,
+    now: i64,
+) []const u8 {
+    var winner_buf: [32]u8 = undefined;
+    var loser_buf: [32]u8 = undefined;
+    return std.fmt.bufPrint(buf, "{s} ({s} vs {s})", .{
+        label,
+        resetLabel(&winner_buf, winner, now),
+        resetLabel(&loser_buf, loser, now),
+    }) catch label;
+}
+
+fn resetLabel(buf: *[32]u8, window: ?registry.RateLimitWindow, now: i64) []const u8 {
+    const reset_at = if (window) |value| value.resets_at else null;
+    if (reset_at == null) return "unknown";
+    if (reset_at.? <= now) return "already reset";
+
+    var tm: c_time.struct_tm = undefined;
+    if (!localtimeCompat(reset_at.?, &tm)) return "unknown";
+    var now_tm: c_time.struct_tm = undefined;
+    if (!localtimeCompat(now, &now_tm)) return "unknown";
+
+    const same_day = tm.tm_year == now_tm.tm_year and tm.tm_mon == now_tm.tm_mon and tm.tm_mday == now_tm.tm_mday;
+    const hour: u32 = @intCast(tm.tm_hour);
+    const minute: u32 = @intCast(tm.tm_min);
+    if (same_day) {
+        return std.fmt.bufPrint(buf, "today at {d:0>2}:{d:0>2}", .{ hour, minute }) catch "unknown";
+    }
+
+    const day: u32 = @intCast(tm.tm_mday);
+    const months = [_][]const u8{
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    };
+    const month_idx: usize = if (tm.tm_mon < 0) 0 else @min(@as(usize, @intCast(tm.tm_mon)), months.len - 1);
+    return std.fmt.bufPrint(buf, "{d:0>2}:{d:0>2} on {d} {s}", .{ hour, minute, day, months[month_idx] }) catch "unknown";
 }
 
 const DaemonLogPriority = enum {
@@ -1284,6 +1436,31 @@ pub fn bestChoiceAccountIndex(reg: *registry.Registry, now: i64) ?usize {
     return bestAccountIndex(reg, now, null, true, reg.auto_switch.strategy);
 }
 
+pub fn explainChoiceWinner(reg: *const registry.Registry, winner_idx: usize, now: i64) ChoiceWinnerExplanation {
+    var runner_up_idx: ?usize = null;
+    var runner_up_score: ?CandidateScore = null;
+
+    for (reg.accounts.items, 0..) |*rec, idx| {
+        if (idx == winner_idx) continue;
+        if (!choiceCandidateAvailable(rec, now, true)) continue;
+        const score = candidateScore(rec, now, true);
+        if (runner_up_score == null or candidateBetter(score, runner_up_score.?, true, reg.auto_switch.strategy)) {
+            runner_up_idx = idx;
+            runner_up_score = score;
+        }
+    }
+
+    if (runner_up_idx == null or runner_up_score == null) {
+        return .{ .runner_up_idx = null, .reason = .only_available };
+    }
+
+    const winner_score = candidateScore(&reg.accounts.items[winner_idx], now, true);
+    return .{
+        .runner_up_idx = runner_up_idx,
+        .reason = choiceWinnerReason(winner_score, runner_up_score.?, reg.auto_switch.strategy),
+    };
+}
+
 fn bestAccountIndex(
     reg: *registry.Registry,
     now: i64,
@@ -1816,7 +1993,13 @@ fn daemonCycleWithAccountNameFetcher(
         if (active_idx_before) |from_idx| {
             if (reg.active_account_key) |account_key| {
                 if (registry.findAccountIndexByAccountKey(reg, account_key)) |to_idx| {
-                    emitAutoSwitchLog(&reg.accounts.items[from_idx], &reg.accounts.items[to_idx]);
+                    emitAutoSwitchLog(
+                        &reg.accounts.items[from_idx],
+                        &reg.accounts.items[to_idx],
+                        reg.auto_switch.choice,
+                        reg.auto_switch.strategy,
+                        std.time.timestamp(),
+                    );
                 }
             }
         }
@@ -1981,6 +2164,23 @@ fn candidateBetter(a: CandidateScore, b: CandidateScore, choice: bool, strategy:
     }
     if (a.last_usage_at != b.last_usage_at) return a.last_usage_at > b.last_usage_at;
     return a.created_at > b.created_at;
+}
+
+fn choiceWinnerReason(a: CandidateScore, b: CandidateScore, strategy: registry.AutoSwitchStrategy) ChoiceWinnerReason {
+    switch (strategy) {
+        .expiry_first => {
+            if (a.resets_at_5h != b.resets_at_5h) return .earlier_5h_reset;
+            if (a.remaining_5h != b.remaining_5h) return .higher_5h_remaining;
+        },
+        .balance_first => {
+            if (a.remaining_5h != b.remaining_5h) return .higher_5h_remaining;
+            if (a.resets_at_5h != b.resets_at_5h) return .earlier_5h_reset;
+        },
+    }
+    if (a.weekly_remaining != b.weekly_remaining) return .higher_weekly_remaining;
+    if (a.weekly_resets_at != b.weekly_resets_at) return .earlier_weekly_reset;
+    if (a.last_usage_at != b.last_usage_at) return .newer_usage_snapshot;
+    return .newer_account_record;
 }
 
 fn windowResetsAt(window: ?registry.RateLimitWindow) i64 {

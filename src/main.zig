@@ -1,6 +1,10 @@
 const std = @import("std");
 const account_api = @import("account_api.zig");
 const account_name_refresh = @import("account_name_refresh.zig");
+const builtin = @import("builtin");
+const c_time = @cImport({
+    @cInclude("time.h");
+});
 const cli = @import("cli.zig");
 const registry = @import("registry.zig");
 const auth = @import("auth.zig");
@@ -13,7 +17,6 @@ const usage_api = @import("usage_api.zig");
 const skip_service_reconcile_env = "CODEX_AUTH_SKIP_SERVICE_RECONCILE";
 const account_name_refresh_only_env = "CODEX_AUTH_REFRESH_ACCOUNT_NAMES_ONLY";
 const disable_background_account_name_refresh_env = "CODEX_AUTH_DISABLE_BACKGROUND_ACCOUNT_NAME_REFRESH";
-
 const AccountFetchFn = *const fn (
     allocator: std.mem.Allocator,
     access_token: []const u8,
@@ -846,10 +849,14 @@ fn handleChoice(allocator: std.mem.Allocator, codex_home: []const u8) !void {
     };
     const best_account_key = reg.accounts.items[best_idx].account_key;
     const best_email = reg.accounts.items[best_idx].email;
+    const choice_reason = try formatChoiceReasonAlloc(allocator, &reg, best_idx, std.time.timestamp());
+    defer allocator.free(choice_reason);
 
     if (reg.active_account_key) |active_account_key| {
         if (std.mem.eql(u8, active_account_key, best_account_key)) {
-            try printChoiceResult("Best account already active.\n");
+            const message = try std.fmt.allocPrint(allocator, "Best account already active.\n{s}\n", .{choice_reason});
+            defer allocator.free(message);
+            try printChoiceResult(message);
             return;
         }
     }
@@ -861,7 +868,7 @@ fn handleChoice(allocator: std.mem.Allocator, codex_home: []const u8) !void {
     var stdout: io_util.Stdout = undefined;
     stdout.init();
     const out = stdout.out();
-    try out.print("Switched to {s}\n", .{best_email});
+    try out.print("Switched to {s}\n{s}\n", .{ best_email, choice_reason });
     try out.flush();
 }
 
@@ -871,6 +878,220 @@ fn printChoiceResult(message: []const u8) !void {
     const out = stdout.out();
     try out.writeAll(message);
     try out.flush();
+}
+
+pub fn formatChoiceReasonAlloc(
+    allocator: std.mem.Allocator,
+    reg: *const registry.Registry,
+    account_idx: usize,
+    now: i64,
+) ![]u8 {
+    const rec = &reg.accounts.items[account_idx];
+    const winner_explanation = auto.explainChoiceWinner(reg, account_idx, now);
+    const rate_5h = registry.resolveRateWindow(rec.last_usage, 300, true);
+    const weekly = registry.resolveRateWindow(rec.last_usage, 10080, false);
+    const remaining_5h = normalizedChoiceRemaining(rate_5h, now);
+    const weekly_remaining = normalizedChoiceRemaining(weekly, now);
+    const winner_reason = try choiceWinnerReasonTextAlloc(allocator, reg, account_idx, winner_explanation, now);
+    defer allocator.free(winner_reason);
+    const reset_label = try formatChoiceResetLabelAlloc(allocator, rate_5h, now);
+    defer allocator.free(reset_label);
+    const remaining_5h_text = try percentTextAlloc(allocator, remaining_5h);
+    defer allocator.free(remaining_5h_text);
+    const weekly_remaining_text = try percentTextAlloc(allocator, weekly_remaining);
+    defer allocator.free(weekly_remaining_text);
+
+    return std.fmt.allocPrint(
+        allocator,
+        "Reason: {s}; {s}; 5h reset {s}; 5h remaining {s}; weekly remaining {s}.",
+        .{
+            choiceStrategyLabel(reg.auto_switch.strategy),
+            winner_reason,
+            reset_label,
+            remaining_5h_text,
+            weekly_remaining_text,
+        },
+    );
+}
+
+fn choiceStrategyLabel(strategy: registry.AutoSwitchStrategy) []const u8 {
+    return switch (strategy) {
+        .expiry_first => "expiry-first",
+        .balance_first => "balance-first",
+    };
+}
+
+fn percentTextAlloc(allocator: std.mem.Allocator, value: i64) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{d}%", .{value});
+}
+
+fn normalizedChoiceRemaining(window: ?registry.RateLimitWindow, now: i64) i64 {
+    return registry.remainingPercentAt(window, now) orelse 100;
+}
+
+fn choiceWinnerReasonTextAlloc(
+    allocator: std.mem.Allocator,
+    reg: *const registry.Registry,
+    winner_idx: usize,
+    explanation: auto.ChoiceWinnerExplanation,
+    now: i64,
+) ![]u8 {
+    if (explanation.runner_up_idx) |runner_up_idx| {
+        const winner = &reg.accounts.items[winner_idx];
+        const runner_up = &reg.accounts.items[runner_up_idx];
+        const runner_up_email = reg.accounts.items[runner_up_idx].email;
+        return switch (explanation.reason) {
+            .only_available => allocator.dupe(u8, "won as the only available account"),
+            .earlier_5h_reset => blk: {
+                const winner_reset = try formatChoiceResetLabelAlloc(
+                    allocator,
+                    registry.resolveRateWindow(winner.last_usage, 300, true),
+                    now,
+                );
+                defer allocator.free(winner_reset);
+                const runner_up_reset = try formatChoiceResetLabelAlloc(
+                    allocator,
+                    registry.resolveRateWindow(runner_up.last_usage, 300, true),
+                    now,
+                );
+                defer allocator.free(runner_up_reset);
+                break :blk std.fmt.allocPrint(
+                    allocator,
+                    "won on earlier 5h reset against {s} ({s} vs {s})",
+                    .{ runner_up_email, winner_reset, runner_up_reset },
+                );
+            },
+            .higher_5h_remaining => blk: {
+                const winner_5h = try percentTextAlloc(
+                    allocator,
+                    normalizedChoiceRemaining(registry.resolveRateWindow(winner.last_usage, 300, true), now),
+                );
+                defer allocator.free(winner_5h);
+                const runner_up_5h = try percentTextAlloc(
+                    allocator,
+                    normalizedChoiceRemaining(registry.resolveRateWindow(runner_up.last_usage, 300, true), now),
+                );
+                defer allocator.free(runner_up_5h);
+                break :blk std.fmt.allocPrint(
+                    allocator,
+                    "won on higher 5h remaining against {s} ({s} vs {s})",
+                    .{ runner_up_email, winner_5h, runner_up_5h },
+                );
+            },
+            .higher_weekly_remaining => blk: {
+                const winner_weekly = try percentTextAlloc(
+                    allocator,
+                    normalizedChoiceRemaining(registry.resolveRateWindow(winner.last_usage, 10080, false), now),
+                );
+                defer allocator.free(winner_weekly);
+                const runner_up_weekly = try percentTextAlloc(
+                    allocator,
+                    normalizedChoiceRemaining(registry.resolveRateWindow(runner_up.last_usage, 10080, false), now),
+                );
+                defer allocator.free(runner_up_weekly);
+                break :blk std.fmt.allocPrint(
+                    allocator,
+                    "won on higher weekly remaining after 5h tie against {s} ({s} vs {s})",
+                    .{ runner_up_email, winner_weekly, runner_up_weekly },
+                );
+            },
+            .earlier_weekly_reset => blk: {
+                const winner_reset = try formatChoiceResetLabelAlloc(
+                    allocator,
+                    registry.resolveRateWindow(winner.last_usage, 10080, false),
+                    now,
+                );
+                defer allocator.free(winner_reset);
+                const runner_up_reset = try formatChoiceResetLabelAlloc(
+                    allocator,
+                    registry.resolveRateWindow(runner_up.last_usage, 10080, false),
+                    now,
+                );
+                defer allocator.free(runner_up_reset);
+                break :blk std.fmt.allocPrint(
+                    allocator,
+                    "won on earlier weekly reset after usage tie against {s} ({s} vs {s})",
+                    .{ runner_up_email, winner_reset, runner_up_reset },
+                );
+            },
+            .newer_usage_snapshot => std.fmt.allocPrint(
+                allocator,
+                "won on newer usage snapshot after quota tie against {s}",
+                .{runner_up_email},
+            ),
+            .newer_account_record => std.fmt.allocPrint(
+                allocator,
+                "won on newer account record after full tie against {s}",
+                .{runner_up_email},
+            ),
+        };
+    }
+    return allocator.dupe(u8, "won as the only available account");
+}
+
+fn formatChoiceResetLabelAlloc(
+    allocator: std.mem.Allocator,
+    window: ?registry.RateLimitWindow,
+    now: i64,
+) ![]u8 {
+    const reset_at = if (window) |value| value.resets_at else null;
+    if (reset_at == null) return allocator.dupe(u8, "unknown");
+    if (reset_at.? <= now) return allocator.dupe(u8, "already reset");
+
+    var tm: c_time.struct_tm = undefined;
+    if (!localtimeCompat(reset_at.?, &tm)) return allocator.dupe(u8, "unknown");
+    var now_tm: c_time.struct_tm = undefined;
+    if (!localtimeCompat(now, &now_tm)) return allocator.dupe(u8, "unknown");
+
+    const same_day = tm.tm_year == now_tm.tm_year and tm.tm_mon == now_tm.tm_mon and tm.tm_mday == now_tm.tm_mday;
+    const hour: u32 = @intCast(tm.tm_hour);
+    const minute: u32 = @intCast(tm.tm_min);
+
+    if (same_day) {
+        return std.fmt.allocPrint(allocator, "today at {d:0>2}:{d:0>2}", .{ hour, minute });
+    }
+
+    const day: u32 = @intCast(tm.tm_mday);
+    const months = [_][]const u8{
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+    };
+    const month_idx: usize = if (tm.tm_mon < 0) 0 else @min(@as(usize, @intCast(tm.tm_mon)), months.len - 1);
+    return std.fmt.allocPrint(allocator, "{d:0>2}:{d:0>2} on {d} {s}", .{ hour, minute, day, months[month_idx] });
+}
+
+fn localtimeCompat(ts: i64, out_tm: *c_time.struct_tm) bool {
+    if (comptime builtin.os.tag == .windows) {
+        if (comptime @hasDecl(c_time, "_localtime64_s") and @hasDecl(c_time, "__time64_t")) {
+            var t64 = std.math.cast(c_time.__time64_t, ts) orelse return false;
+            return c_time._localtime64_s(out_tm, &t64) == 0;
+        }
+        return false;
+    }
+
+    var t = std.math.cast(c_time.time_t, ts) orelse return false;
+    if (comptime @hasDecl(c_time, "localtime_r")) {
+        return c_time.localtime_r(&t, out_tm) != null;
+    }
+
+    if (comptime @hasDecl(c_time, "localtime")) {
+        const tm_ptr = c_time.localtime(&t);
+        if (tm_ptr == null) return false;
+        out_tm.* = tm_ptr.*;
+        return true;
+    }
+
+    return false;
 }
 
 fn handleConfig(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.ConfigOptions) !void {
