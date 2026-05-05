@@ -39,14 +39,11 @@ pub fn fetchUsageForAuthPath(allocator: std.mem.Allocator, auth_path: []const u8
 }
 
 pub fn fetchUsageForAuthPathDetailed(allocator: std.mem.Allocator, auth_path: []const u8) !UsageFetchResult {
-    const info = try auth.parseAuthInfo(allocator, auth_path);
-    defer info.deinit(allocator);
+    const first_result = try fetchUsageForAuthPathOnce(allocator, auth_path);
+    if (first_result.status_code != 401) return first_result;
 
-    if (info.auth_mode != .chatgpt) return .{ .snapshot = null, .status_code = null, .missing_auth = true };
-    const access_token = info.access_token orelse return .{ .snapshot = null, .status_code = null, .missing_auth = true };
-    const chatgpt_account_id = info.chatgpt_account_id orelse return .{ .snapshot = null, .status_code = null, .missing_auth = true };
-
-    return try fetchUsageForTokenDetailed(allocator, default_usage_endpoint, access_token, chatgpt_account_id);
+    if (!(try auth.refreshAuthAtPath(allocator, auth_path))) return first_result;
+    return try fetchUsageForAuthPathOnce(allocator, auth_path);
 }
 
 pub fn fetchUsageForToken(
@@ -209,4 +206,15 @@ fn runUsageCommand(
         .body = result.body,
         .status_code = result.status_code,
     };
+}
+
+fn fetchUsageForAuthPathOnce(allocator: std.mem.Allocator, auth_path: []const u8) !UsageFetchResult {
+    const info = try auth.parseAuthInfo(allocator, auth_path);
+    defer info.deinit(allocator);
+
+    if (info.auth_mode != .chatgpt) return .{ .snapshot = null, .status_code = null, .missing_auth = true };
+    const access_token = info.access_token orelse return .{ .snapshot = null, .status_code = null, .missing_auth = true };
+    const chatgpt_account_id = info.chatgpt_account_id orelse return .{ .snapshot = null, .status_code = null, .missing_auth = true };
+
+    return try fetchUsageForTokenDetailed(allocator, default_usage_endpoint, access_token, chatgpt_account_id);
 }

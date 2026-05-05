@@ -1039,13 +1039,65 @@ fn refreshActiveAccountNamesForDaemon(
     reg: *registry.Registry,
     refresh_state: *DaemonRefreshState,
 ) !bool {
-    return refreshActiveAccountNamesForDaemonWithFetcher(
-        allocator,
-        codex_home,
-        reg,
-        refresh_state,
-        fetchActiveAccountNames,
-    );
+    if (!reg.auto_switch.enabled) return false;
+    if (!reg.api.account) return false;
+    const account_key = reg.active_account_key orelse return false;
+    try refresh_state.resetAccountNameCooldownIfAccountChanged(allocator, account_key);
+
+    const now_ns = std.time.nanoTimestamp();
+    if (refresh_state.last_account_name_refresh_at_ns != 0 and
+        (now_ns - refresh_state.last_account_name_refresh_at_ns) < api_refresh_interval_ns)
+    {
+        return false;
+    }
+
+    var candidates = try account_name_refresh.collectCandidates(allocator, reg);
+    defer {
+        for (candidates.items) |*candidate| candidate.deinit(allocator);
+        candidates.deinit(allocator);
+    }
+    if (candidates.items.len == 0) return false;
+
+    var attempted = false;
+    var changed = false;
+
+    for (candidates.items) |candidate| {
+        var latest = try registry.loadRegistry(allocator, codex_home);
+        defer latest.deinit(allocator);
+
+        if (!latest.auto_switch.enabled or !latest.api.account) continue;
+        if (!registry.shouldFetchTeamAccountNamesForUser(&latest, candidate.chatgpt_user_id)) continue;
+
+        var selection = (try account_name_refresh.loadStoredAuthSelectionForUser(
+            allocator,
+            codex_home,
+            &latest,
+            candidate.chatgpt_user_id,
+        )) orelse continue;
+        defer selection.deinit(allocator);
+
+        if (!attempted) {
+            refresh_state.last_account_name_refresh_at_ns = now_ns;
+            attempted = true;
+        }
+
+        const result = account_api.fetchAccountsForAuthPathDetailed(
+            allocator,
+            account_api.default_account_endpoint,
+            selection.auth_path,
+        ) catch |err| {
+            std.log.warn("account metadata refresh skipped: {s}", .{@errorName(err)});
+            continue;
+        };
+        defer result.deinit(allocator);
+
+        const entries = result.entries orelse continue;
+        if (try applyDaemonAccountNameEntriesToLatestRegistry(allocator, codex_home, candidate.chatgpt_user_id, entries)) {
+            changed = true;
+        }
+    }
+
+    return changed;
 }
 
 pub fn refreshActiveAccountNamesForDaemonWithFetcher(
@@ -1442,7 +1494,7 @@ pub fn explainChoiceWinner(reg: *const registry.Registry, winner_idx: usize, now
 
     for (reg.accounts.items, 0..) |*rec, idx| {
         if (idx == winner_idx) continue;
-        if (!choiceCandidateAvailable(rec, now, true)) continue;
+        if (!choiceCandidateAvailable(reg, rec, now, true)) continue;
         const score = candidateScore(rec, now, true);
         if (runner_up_score == null or candidateBetter(score, runner_up_score.?, true, reg.auto_switch.strategy)) {
             runner_up_idx = idx;
@@ -1474,7 +1526,7 @@ fn bestAccountIndex(
         if (skip_account_key) |account_key| {
             if (std.mem.eql(u8, rec.account_key, account_key)) continue;
         }
-        if (!choiceCandidateAvailable(rec, now, choice)) continue;
+        if (!choiceCandidateAvailable(reg, rec, now, choice)) continue;
         const score = candidateScore(rec, now, choice);
         if (best == null or candidateBetter(score, best.?, choice, strategy)) {
             best = score;
@@ -1484,17 +1536,18 @@ fn bestAccountIndex(
     return best_idx;
 }
 
-fn choiceCandidateAvailable(rec: *const registry.AccountRecord, now: i64, choice: bool) bool {
+fn choiceCandidateAvailable(reg: *const registry.Registry, rec: *const registry.AccountRecord, now: i64, choice: bool) bool {
     if (!choice) return true;
-    const rate_5h = registry.resolveRateWindow(rec.last_usage, 300, true);
-    const remaining_5h = registry.remainingPercentAt(rate_5h, now);
-    return remaining_5h == null or remaining_5h.? > 0;
+    return !accountBelowSwitchThreshold(reg, rec, now);
 }
 
 pub fn shouldSwitchCurrent(reg: *registry.Registry, now: i64) bool {
     const account_key = reg.active_account_key orelse return false;
     const idx = registry.findAccountIndexByAccountKey(reg, account_key) orelse return false;
-    const rec = &reg.accounts.items[idx];
+    return accountBelowSwitchThreshold(reg, &reg.accounts.items[idx], now);
+}
+
+fn accountBelowSwitchThreshold(reg: *const registry.Registry, rec: *const registry.AccountRecord, now: i64) bool {
     const resolved_5h = resolve5hTriggerWindow(rec.last_usage);
     const threshold_5h_percent = effective5hThresholdPercent(reg, rec, resolved_5h.allow_free_guard);
     const rem_5h = registry.remainingPercentAt(resolved_5h.window, now);
@@ -1503,7 +1556,7 @@ pub fn shouldSwitchCurrent(reg: *registry.Registry, now: i64) bool {
         (rem_week != null and rem_week.? < @as(i64, reg.auto_switch.threshold_weekly_percent));
 }
 
-fn effective5hThresholdPercent(reg: *registry.Registry, rec: *const registry.AccountRecord, allow_free_guard: bool) i64 {
+fn effective5hThresholdPercent(reg: *const registry.Registry, rec: *const registry.AccountRecord, allow_free_guard: bool) i64 {
     var threshold = @as(i64, reg.auto_switch.threshold_5h_percent);
     if (allow_free_guard and registry.resolvePlan(rec) == .free) {
         threshold = @max(threshold, free_plan_realtime_guard_5h_percent);
@@ -2013,7 +2066,59 @@ fn daemonCycleWithAccountNameFetcher(
 }
 
 fn daemonCycle(allocator: std.mem.Allocator, codex_home: []const u8, refresh_state: *DaemonRefreshState) !bool {
-    return daemonCycleWithAccountNameFetcher(allocator, codex_home, refresh_state, fetchActiveAccountNames);
+    var reg = try refresh_state.ensureRegistryLoaded(allocator, codex_home);
+    if (!reg.auto_switch.enabled) return false;
+
+    var changed = false;
+    if (try refresh_state.syncActiveAuthIfChanged(allocator, codex_home)) {
+        changed = true;
+    }
+
+    if (changed) {
+        try registry.saveRegistry(allocator, codex_home, reg);
+        try refresh_state.refreshTrackedFileMtims(allocator, codex_home);
+        changed = false;
+    }
+
+    if (try refreshActiveAccountNamesForDaemon(allocator, codex_home, reg, refresh_state)) {
+        changed = true;
+    }
+    try refresh_state.reloadRegistryStateIfChanged(allocator, codex_home);
+    reg = refresh_state.currentRegistry();
+    if (!reg.auto_switch.enabled) return true;
+
+    if (try refreshActiveUsageForDaemon(allocator, codex_home, reg, refresh_state)) {
+        changed = true;
+    }
+    const active_idx_before = if (reg.active_account_key) |account_key|
+        registry.findAccountIndexByAccountKey(reg, account_key)
+    else
+        null;
+    const auto_switch_attempt = try maybeAutoSwitchForDaemonWithUsageFetcher(allocator, codex_home, reg, refresh_state, usage_api.fetchUsageForAuthPathDetailed);
+    if (auto_switch_attempt.state_changed or auto_switch_attempt.switched) {
+        changed = true;
+    }
+    if (auto_switch_attempt.switched) {
+        if (active_idx_before) |from_idx| {
+            if (reg.active_account_key) |account_key| {
+                if (registry.findAccountIndexByAccountKey(reg, account_key)) |to_idx| {
+                    emitAutoSwitchLog(
+                        &reg.accounts.items[from_idx],
+                        &reg.accounts.items[to_idx],
+                        reg.auto_switch.choice,
+                        reg.auto_switch.strategy,
+                        std.time.timestamp(),
+                    );
+                }
+            }
+        }
+    }
+
+    if (changed) {
+        try registry.saveRegistry(allocator, codex_home, reg);
+        try refresh_state.refreshTrackedFileMtims(allocator, codex_home);
+    }
+    return true;
 }
 
 pub fn daemonCycleWithAccountNameFetcherForTest(
