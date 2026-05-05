@@ -21,9 +21,12 @@ read_lines() {
   done
 }
 
-files=()
+declare -a files=()
 read_lines < <(git ls-files -- 'build.zig' '*.zig')
-tracked_zig_files=("${files[@]}")
+declare -a tracked_zig_files=()
+if [[ ${#files[@]} -gt 0 ]]; then
+  tracked_zig_files=("${files[@]}")
+fi
 
 if [[ "${#tracked_zig_files[@]}" -eq 0 ]]; then
   echo "No Zig files found."
@@ -34,9 +37,12 @@ if [[ "$mode" == "--check" ]]; then
   echo "Checking Zig formatting..."
   zig fmt --check "${tracked_zig_files[@]}"
 else
-  files=()
+  declare -a files=()
   read_lines < <(git diff --cached --name-only --diff-filter=ACMR -- 'build.zig' '*.zig')
-  staged_zig_files=("${files[@]}")
+  declare -a staged_zig_files=()
+  if [[ ${#files[@]} -gt 0 ]]; then
+    staged_zig_files=("${files[@]}")
+  fi
   if [[ "${#staged_zig_files[@]}" -gt 0 ]]; then
     for file in "${staged_zig_files[@]}"; do
       if ! git diff --quiet -- "$file"; then
